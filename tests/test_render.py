@@ -15,11 +15,12 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_ROOT = REPOSITORY_ROOT / "templates"
 INDEX = json.loads((TEMPLATES_ROOT / "index.json").read_text(encoding="utf-8"))
 CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
-CORE_COMMIT = "883addad1e2993c4be6fc8ba053f87f25fb5057a"
+CORE_COMMIT = "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc"
 EXPECTED_CORE_DEPENDENCIES = {
     "bub/default": {"agentseek-ag-ui"},
     "deepagents/content-builder": set(),
     "deepagents/default": {"agentseek-ag-ui", "agentseek-langchain"},
+    "deepagents/mcp": set(),
     "deepagents/research": set(),
     "deepagents/sandbox": set(),
     "langchain/agentic-rag": set(),
@@ -74,6 +75,38 @@ EXPECTED_NORMALIZED_TOPOLOGY = {
             "project:start_dev",
             "service:gateway:copy",
             "service:gateway:reference:docs",
+        ),
+    },
+    "deepagents/mcp": {
+        "services": (
+            (
+                "calculator-http",
+                "protocol",
+                "hidden",
+                False,
+                ("process:calculator-http",),
+                ("calculator-http",),
+                ("docs",),
+            ),
+            ("frontend", "web", "default", True, ("process:frontend",), ("frontend",), ()),
+            (
+                "langgraph",
+                "api",
+                "advanced",
+                False,
+                ("process:langgraph",),
+                ("langgraph",),
+                ("api_docs", "docs", "studio"),
+            ),
+        ),
+        "effects": {},
+        "actions": (
+            "project:start_dev",
+            "service:frontend:open",
+            "service:langgraph:copy",
+            "service:langgraph:reference:api_docs",
+            "service:langgraph:reference:docs",
+            "service:langgraph:reference:studio",
         ),
     },
     "deepagents/research": {
@@ -136,17 +169,8 @@ EXPECTED_NORMALIZED_TOPOLOGY = {
                 ("api_docs", "docs", "studio"),
             ),
             ("frontend", "web", "default", True, ("process:frontend",), ("frontend",), ()),
-            (
-                "seekdb",
-                "database",
-                "advanced",
-                False,
-                ("process:seekdb", "task:seekdb"),
-                (),
-                ("docs",),
-            ),
         ),
-        "effects": {"seekdb": (("seekdb",), ())},
+        "effects": {},
         "actions": (
             "project:start_dev",
             "service:backend:copy",
@@ -154,9 +178,6 @@ EXPECTED_NORMALIZED_TOPOLOGY = {
             "service:backend:reference:docs",
             "service:backend:reference:studio",
             "service:frontend:open",
-            "service:seekdb:copy",
-            "service:seekdb:reference:docs",
-            "task:seekdb",
         ),
     },
     "langchain/agentic-rag-hybrid": {
@@ -296,6 +317,10 @@ def _registered_templates() -> list[tuple[str, Path]]:
     return [(key, TEMPLATES_ROOT / key) for key in sorted(INDEX)]
 
 
+def test_reviewed_contract_covers_every_registered_template() -> None:
+    assert set(INDEX) == set(EXPECTED_CORE_DEPENDENCIES) == set(EXPECTED_NORMALIZED_TOPOLOGY)
+
+
 def _render(
     template_root: Path,
     output_root: Path,
@@ -420,6 +445,23 @@ def test_generated_core_dependencies_are_immutable(
             "rev": CORE_COMMIT,
             "subdirectory": f"contrib/{dependency}",
         }
+
+
+def test_mcp_lifecycle_advertises_protocol_url_and_separate_health_check(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "deepagents/mcp", output_root, tmp_path)
+    spec = read_lifecycle_spec(
+        generated_path / ".agentseek" / "lifecycle.toml",
+        project_root=generated_path,
+    )
+    normalized = normalize_lifecycle(spec, project_root=generated_path)
+
+    calculator_service = next(service for service in normalized.services if service.id == "calculator-http")
+    calculator_check = next(check for check in normalized.checks if check.id == "calculator-http")
+
+    assert calculator_service.url == "http://127.0.0.1:8765/mcp"
+    assert calculator_check.target == "http://127.0.0.1:8765/health"
 
 
 def test_cli_remote_does_not_claim_that_local_dev_provides_an_external_server(tmp_path: Path) -> None:
