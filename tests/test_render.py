@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -28,6 +30,7 @@ EXPECTED_CORE_DEPENDENCIES = {
     "langchain/agentic-rag-openvino": set(),
     "langchain/cli-remote": {"agentseek-langchain"},
     "langchain/default": {"agentseek-ag-ui", "agentseek-langchain"},
+    "langchain/relay-observability": {"agentseek-ag-ui", "agentseek-langchain"},
     "langchain/markdown-messages": set(),
 }
 EXPECTED_NORMALIZED_TOPOLOGY = {
@@ -286,6 +289,24 @@ EXPECTED_NORMALIZED_TOPOLOGY = {
             "service:phoenix:reference:docs",
         ),
     },
+    "langchain/relay-observability": {
+        "services": (
+            ("copilotkit", "api", "hidden", False, ("process:stack",), ("copilotkit",), ("docs",)),
+            ("frontend", "web", "default", True, ("process:stack",), ("frontend",), ()),
+            ("gateway", "protocol", "advanced", False, ("process:stack",), ("gateway",), ("docs",)),
+            ("phoenix", "web", "advanced", False, ("process:stack",), ("phoenix",), ("docs",)),
+            ("seekdb", "database", "hidden", False, ("process:stack",), (), ("docs",)),
+        ),
+        "effects": {},
+        "actions": (
+            "project:start_dev",
+            "service:frontend:open",
+            "service:gateway:copy",
+            "service:gateway:reference:docs",
+            "service:phoenix:open",
+            "service:phoenix:reference:docs",
+        ),
+    },
     "langchain/markdown-messages": {
         "services": (
             (
@@ -462,6 +483,42 @@ def test_mcp_lifecycle_advertises_protocol_url_and_separate_health_check(tmp_pat
 
     assert calculator_service.url == "http://127.0.0.1:8765/mcp"
     assert calculator_check.target == "http://127.0.0.1:8765/health"
+
+
+def test_relay_observability_render_runs_child_tests_with_dummy_credentials(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(
+        TEMPLATES_ROOT / "langchain/relay-observability",
+        output_root,
+        tmp_path,
+        extra_context={"project_name": "Rendered Relay Child"},
+    )
+    env = {
+        **os.environ,
+        "OPENAI_API_KEY": "test-openai-key",
+        "TAVILY_API_KEY": "test-tavily-key",
+        "RELAY_ENABLED": "false",
+    }
+    sync = subprocess.run(
+        ["uv", "sync", "--extra", "dev"],
+        cwd=generated_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert sync.returncode == 0, sync.stdout + sync.stderr
+    child_command = ["uv", "run", "python", "-m", "pytest", "-q"]
+    result = subprocess.run(
+        child_command,
+        cwd=generated_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_cli_remote_does_not_claim_that_local_dev_provides_an_external_server(tmp_path: Path) -> None:
