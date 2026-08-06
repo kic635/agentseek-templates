@@ -521,6 +521,45 @@ def test_relay_observability_render_runs_child_tests_with_dummy_credentials(tmp_
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_deepagents_default_render_runs_child_tests(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(
+        TEMPLATES_ROOT / "deepagents/default",
+        output_root,
+        tmp_path,
+        extra_context={"project_name": "Rendered DeepAgents Default"},
+    )
+    rendered_readme = (generated_path / "README.md").read_text(encoding="utf-8")
+    assert "HarnessProfile" in rendered_readme
+    assert "ProviderProfile" in rendered_readme
+    assert "use_responses_api=False" in rendered_readme
+    assert "Chat Completions" in rendered_readme
+    env = {
+        **os.environ,
+        "BUB_MODEL": "openai:test-model",
+        "BUB_API_KEY": "test-api-key",
+    }
+    sync = subprocess.run(
+        ["uv", "sync", "--dev"],
+        cwd=generated_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert sync.returncode == 0, sync.stdout + sync.stderr
+    result = subprocess.run(
+        ["uv", "run", "python", "-m", "pytest", "-q"],
+        cwd=generated_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_cli_remote_does_not_claim_that_local_dev_provides_an_external_server(tmp_path: Path) -> None:
     template_root = TEMPLATES_ROOT / "langchain/cli-remote"
     output_root = tmp_path / "output"
