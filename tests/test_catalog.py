@@ -13,7 +13,6 @@ TEMPLATES_ROOT = REPOSITORY_ROOT / "templates"
 INDEX_PATH = TEMPLATES_ROOT / "index.json"
 ORIGIN_PATH = REPOSITORY_ROOT / "catalog-origin.json"
 RELEASE_PATH = REPOSITORY_ROOT / "catalog-release.json"
-SOURCE_INDEX_PATH = REPOSITORY_ROOT / "provenance" / "source-index.json"
 PYPROJECT_PATH = REPOSITORY_ROOT / "pyproject.toml"
 LOCK_PATH = REPOSITORY_ROOT / "uv.lock"
 EXPECTED_SOURCE_COMMIT = "82c659c8d0f6c91981582f154d3001e3d3509299"
@@ -21,9 +20,6 @@ EXPECTED_SOURCE_REGISTRY_SHA256 = "5695b14933fa4be57f77f6838c85dff1be72d8813aa71
 EXPECTED_CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
 EXPECTED_CORE_COMMIT = "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc"
 EXPECTED_CORE_RELEASE = "v0.1.1"
-EXPECTED_LOCAL_TEMPLATES = {
-    "langchain/relay-observability",
-}
 
 
 def _registry() -> dict[str, str]:
@@ -104,15 +100,15 @@ def test_every_template_carries_the_reviewed_core_dependency_coordinate() -> Non
         assert context["_agentseek_source_ref"] == EXPECTED_CORE_COMMIT, key
 
 
-def test_catalog_provenance_matches_the_frozen_source_inventory() -> None:
+def test_catalog_origin_matches_the_frozen_import_inventory() -> None:
     origin = json.loads(ORIGIN_PATH.read_text(encoding="utf-8"))
-    source_registry = json.loads(SOURCE_INDEX_PATH.read_text(encoding="utf-8"))
+    registry = _registry()
+    included_templates = origin.pop("included_templates")
     assert origin == {
         "schema_version": 1,
         "source_repository": "https://github.com/ob-labs/agentseek.git",
         "source_commit": EXPECTED_SOURCE_COMMIT,
         "source_registry_sha256": EXPECTED_SOURCE_REGISTRY_SHA256,
-        "included_templates": sorted(source_registry),
         "excluded_templates": [
             {
                 "path": "templates/bub/contextseek",
@@ -123,11 +119,20 @@ def test_catalog_provenance_matches_the_frozen_source_inventory() -> None:
             }
         ],
     }
-    assert set(_registry()) == set(source_registry) | EXPECTED_LOCAL_TEMPLATES
+    assert included_templates == sorted(set(included_templates))
+    assert set(included_templates) <= set(registry)
 
 
-def test_recorded_registry_digest_uses_the_frozen_source_registry_bytes() -> None:
-    digest = hashlib.sha256(SOURCE_INDEX_PATH.read_bytes()).hexdigest()
+def test_catalog_does_not_publish_a_second_registry() -> None:
+    assert not (REPOSITORY_ROOT / "provenance" / "source-index.json").exists()
+
+
+def test_recorded_registry_digest_uses_the_frozen_import_inventory() -> None:
+    origin = json.loads(ORIGIN_PATH.read_text(encoding="utf-8"))
+    registry = _registry()
+    imported_registry = {key: registry[key] for key in origin["included_templates"]}
+    imported_bytes = (json.dumps(imported_registry, indent=2) + "\n").encode()
+    digest = hashlib.sha256(imported_bytes).hexdigest()
     assert digest == EXPECTED_SOURCE_REGISTRY_SHA256
 
 
