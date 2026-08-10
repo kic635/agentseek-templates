@@ -478,6 +478,28 @@ def test_migrated_templates_declare_agentseek_api_runtime_and_dependency(
 
 
 @pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
+def test_migrated_templates_resolve_api_through_uv_without_path_activation(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    """The lifecycle must let ``uv run`` resolve the API executable itself."""
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+    lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
+
+    tools = set(lifecycle.get("tools", {}).get("required", []))
+    assert "agentseek-api" not in tools
+    api_commands = [
+        " ".join(str(part) for part in process["command"])
+        for process in lifecycle["processes"].values()
+        if "agentseek-api" in " ".join(str(part) for part in process["command"])
+    ]
+    assert len(api_commands) == 1
+    assert "uv run agentseek-api dev" in api_commands[0]
+
+
+@pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
 def test_migrated_templates_expose_api_health_and_preserve_graph_config(
     template_key: str,
     tmp_path: Path,

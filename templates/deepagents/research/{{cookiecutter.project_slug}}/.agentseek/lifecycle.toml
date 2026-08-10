@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv", "node", "npm", "agentseek-api"]
+required = ["uv", "node", "npm"]
 
 [paths]
 required = ["pyproject.toml", "langgraph.json", "frontend/package.json", "frontend/node_modules"]

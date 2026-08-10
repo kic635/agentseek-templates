@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv", "node", "npm", "docker", "agentseek-api"]
+required = ["uv", "node", "npm", "docker"]
 
 [paths]
 required = [

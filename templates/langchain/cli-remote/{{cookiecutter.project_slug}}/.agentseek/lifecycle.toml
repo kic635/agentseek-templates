@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv", "agentseek-api"]
+required = ["uv"]
 
 [paths]
 required = [
