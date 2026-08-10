@@ -199,6 +199,7 @@ jobs:
       - name: Validate the rendered lifecycle
         working-directory: ${{ runner.temp }}/rubric-render/rubric_lab
         run: |
+          export PATH="$PWD/.venv/bin:$PATH"
           uv run --project "${GITHUB_WORKSPACE}" agentseek task rubric-smoke
           uv run --project "${GITHUB_WORKSPACE}" agentseek info
           uv run --project "${GITHUB_WORKSPACE}" agentseek doctor

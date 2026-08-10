@@ -468,7 +468,11 @@ def test_migrated_templates_declare_agentseek_api_runtime_and_dependency(
 
     pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
     dependencies = set(pyproject["project"].get("dependencies", []))
-    requirements = (generated_path / "requirements.txt").read_text(encoding="utf-8") if (generated_path / "requirements.txt").is_file() else ""
+    requirements = (
+        (generated_path / "requirements.txt").read_text(encoding="utf-8")
+        if (generated_path / "requirements.txt").is_file()
+        else ""
+    )
     assert "agentseek-api" in dependencies or "agentseek-api" in requirements
     assert "mcp>=1.27.1,<2" in dependencies
 
