@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv", "node", "npm", "docker"]
+required = ["uv", "node", "npm", "docker", "agentseek-api"]
 
 [paths]
 required = [
@@ -65,7 +65,7 @@ description = "seekdb vector table for indexed document chunks."
 [env.LANGGRAPH_HOST]
 required = false
 default = "127.0.0.1"
-description = "LangGraph dev bind host. Use 0.0.0.0 only on trusted networks."
+description = "AgentSeek API bind host. Use 0.0.0.0 only on trusted networks."
 
 [env.FRONTEND_HOST]
 required = false
@@ -92,12 +92,12 @@ tech = "seekdb"
 links = { docs = "https://www.oceanbase.ai/docs/" }
 
 [services.backend]
-name = "LangGraph API"
+name = "AgentSeek API"
 url = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+tech = "agentseek-api"
 kind = "api"
 display = "advanced"
 description = "Agent API serving the local OpenVINO retrieve-then-generate graph."
-tech = "langgraph"
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
 
 [services.frontend]
@@ -113,7 +113,7 @@ tech = "vite"
 command = ["docker", "compose", "up", "seekdb"]
 
 [processes.backend]
-command = ["sh", "-lc", "i=0; until docker compose exec -T seekdb mysql -h127.0.0.1 -P2881 -uroot -e 'SELECT 1'; do i=$((i + 1)); if [ \"$i\" -ge 60 ]; then exit 1; fi; sleep 2; done && uv run langgraph dev --no-browser --host ${LANGGRAPH_HOST:-127.0.0.1} --port {{ cookiecutter.langgraph_port }}"]
+command = ["sh", "-lc", "i=0; until docker compose exec -T seekdb mysql -h127.0.0.1 -P2881 -uroot -e 'SELECT 1'; do i=$((i + 1)); if [ \"$i\" -ge 60 ]; then exit 1; fi; sleep 2; done && uv run agentseek-api dev --host ${LANGGRAPH_HOST:-127.0.0.1} --port {{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -121,13 +121,15 @@ cwd = "frontend"
 
 [checks.backend]
 type = "http"
-target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/health"
+service = "backend"
 timeout = 2
 attempts = 3
 
 [checks.frontend]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.frontend_port }}"
+service = "frontend"
 timeout = 2
 attempts = 3
 

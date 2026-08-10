@@ -1,6 +1,6 @@
 # LangChain — cli-remote template
 
-生成一个通过 `langgraph dev` 运行 remote graph，并用
+生成一个通过 `agentseek-api dev` 运行 remote graph，并用
 `LangGraphClientRunnable` 接入 Bub 的项目。
 
 ## Architecture
@@ -8,7 +8,7 @@
 ```text
 uvx agentseek dev
   -> .agentseek/lifecycle.toml
-    -> uv run langgraph dev
+    -> uv run agentseek-api dev
       -> create_agent(...)
 
 Bub runtime

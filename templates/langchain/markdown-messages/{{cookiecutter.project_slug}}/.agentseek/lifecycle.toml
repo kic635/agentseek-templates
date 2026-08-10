@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv", "node", "npm"]
+required = ["uv", "node", "npm", "agentseek-api"]
 
 [paths]
 required = ["frontend/package.json", "frontend/node_modules"]
@@ -27,14 +27,14 @@ description = "Chat model id passed to LangChain init_chat_model. OPENAI_MODEL i
 aliases = ["OPENAI_MODEL"]
 
 [services.backend]
-name = "LangGraph API"
+name = "AgentSeek API"
 url = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
 kind = "api"
 display = "advanced"
 primary = false
-description = "LangGraph development API that runs the LangChain chat agent."
-tech = "langgraph"
-links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
+description = "AgentSeek API runtime that runs the LangChain chat agent."
+tech = "agentseek-api"
+links = { docs = "https://github.com/ob-labs/agentseek-api", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
 
 [services.frontend]
 name = "Markdown chat application"
@@ -47,7 +47,7 @@ tech = "vite"
 links = { docs = "https://vite.dev/guide/" }
 
 [processes.backend]
-command = ["uv", "run", "langgraph", "dev", "--port", "{{ cookiecutter.langgraph_port }}", "--no-browser"]
+command = ["uv", "run", "agentseek-api", "dev", "--port", "{{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -55,7 +55,8 @@ cwd = "frontend"
 
 [checks.backend]
 type = "http"
-target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/health"
+service = "backend"
 timeout = 2
 attempts = 3
 

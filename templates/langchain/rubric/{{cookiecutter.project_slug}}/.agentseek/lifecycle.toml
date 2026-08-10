@@ -6,7 +6,7 @@ guide = "README.md"
 env_file = ".env"
 
 [tools]
-required = ["uv", "node", "npm"]
+required = ["uv", "node", "npm", "agentseek-api"]
 
 [paths]
 required = ["pyproject.toml", "langgraph.json", "frontend/package.json", "frontend/node_modules"]
@@ -61,17 +61,17 @@ tech = "vite"
 links = { docs = "https://vite.dev/guide/" }
 
 [services.langgraph]
-name = "LangGraph API"
+name = "AgentSeek API"
 url = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+tech = "agentseek-api"
 kind = "api"
 display = "advanced"
 primary = false
-description = "LangGraph development API exposing the deterministic and live rubric graphs."
-tech = "langgraph"
+description = "AgentSeek API runtime exposing the deterministic and live rubric graphs."
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
 
 [processes.langgraph]
-command = ["uv", "run", "langgraph", "dev", "--port", "{{ cookiecutter.langgraph_port }}", "--no-browser"]
+command = ["uv", "run", "agentseek-api", "dev", "--port", "{{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -79,13 +79,15 @@ cwd = "frontend"
 
 [checks.langgraph]
 type = "http"
-target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/health"
+service = "langgraph"
 timeout = 2
 attempts = 3
 
 [checks.frontend]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.frontend_port }}"
+service = "frontend"
 timeout = 2
 attempts = 3
 

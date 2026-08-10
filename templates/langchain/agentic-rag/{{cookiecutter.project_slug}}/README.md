@@ -3,7 +3,7 @@
 LangChain agentic RAG scaffolded with
 `agentseek create langchain/agentic-rag`.
 
-The backend serves a `create_agent(...)` graph through `langgraph dev`.
+The backend serves a `create_agent(...)` graph through `agentseek-api dev`.
 The frontend streams user messages, tool calls (retrieval), and the final
 markdown answer.
 
@@ -28,6 +28,21 @@ project declares the development stack in `.agentseek/lifecycle.toml`.
 The default mode uses embedded OceanBase seekdb in-process. Ingest and the
 backend share `SEEKDB_PATH`, which defaults outside the project tree so native
 database writes do not trigger LangGraph reloads.
+
+`agentseek dev` starts the backend through `agentseek-api dev`. The template
+uses `SEEKDB_MODE=embedded`, `SEEKDB_PATH`, and `SEEKDB_DB_NAME`; current
+AgentSeek API versions additionally require the equivalent settings below in
+`.env` until the two configuration protocols are unified:
+
+```env
+SEEKDB_EMBED=true
+SEEKDB_EMBED_DIR=~/.agentseek/agentic-rag/<project-slug>/seekdb
+OCEANBASE_DB_NAME=test
+```
+
+Keep these values aligned with the template's `SEEKDB_PATH` and
+`SEEKDB_DB_NAME`. This avoids requiring a separately running MySQL/SeekDB
+service for local development.
 
 To explicitly use the optional Docker server instead, set `SEEKDB_MODE=server`
 in `.env`, then run `agentseek task seekdb-docker`. Stop it with

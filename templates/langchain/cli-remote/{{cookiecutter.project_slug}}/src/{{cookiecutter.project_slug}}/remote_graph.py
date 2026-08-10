@@ -1,4 +1,4 @@
-"""Graph exported to `langgraph dev` for the remote-agent project."""
+"""Graph exported to `agentseek-api dev` for the remote-agent project."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def rollout_steps(task: str) -> str:
 
 
 def build_graph() -> Any:
-    """Build the remote graph served by `langgraph dev`."""
+    """Build the remote graph served by `agentseek-api dev`."""
 
     settings = get_settings()
     settings.apply_openai_env_bridge()

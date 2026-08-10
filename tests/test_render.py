@@ -19,6 +19,18 @@ TEMPLATES_ROOT = REPOSITORY_ROOT / "templates"
 INDEX = json.loads((TEMPLATES_ROOT / "index.json").read_text(encoding="utf-8"))
 CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
 CORE_COMMIT = "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc"
+MIGRATED_RUNTIME_TEMPLATES = {
+    "deepagents/content-builder",
+    "deepagents/mcp",
+    "deepagents/research",
+    "deepagents/sandbox",
+    "langchain/agentic-rag",
+    "langchain/agentic-rag-hybrid",
+    "langchain/agentic-rag-openvino",
+    "langchain/cli-remote",
+    "langchain/markdown-messages",
+    "langchain/rubric",
+}
 EXPECTED_CORE_DEPENDENCIES = {
     "bub/default": {"agentseek-ag-ui"},
     "deepagents/content-builder": set(),
@@ -440,6 +452,109 @@ def test_registered_template_renders_as_complete_lifecycle_v2(
     assert pyproject["project"]["name"]
 
 
+@pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
+def test_migrated_templates_declare_agentseek_api_runtime_and_dependency(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+    lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
+    processes = lifecycle["processes"]
+    commands = [" ".join(str(part) for part in process["command"]) for process in processes.values()]
+    assert any("agentseek-api" in command and " dev" in command for command in commands)
+    assert all("langgraph dev" not in command for command in commands)
+
+    pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = set(pyproject["project"].get("dependencies", []))
+    requirements = (generated_path / "requirements.txt").read_text(encoding="utf-8") if (generated_path / "requirements.txt").is_file() else ""
+    assert "agentseek-api" in dependencies or "agentseek-api" in requirements
+    assert "mcp>=1.27.1,<2" in dependencies
+
+
+@pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
+def test_migrated_templates_expose_api_health_and_preserve_graph_config(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    """Regression-test the minimum AgentSeek API contract at render time."""
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+
+    lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
+    api_processes = [
+        process
+        for process in lifecycle["processes"].values()
+        if "agentseek-api" in " ".join(str(part) for part in process["command"])
+    ]
+    assert len(api_processes) == 1
+    api_process = api_processes[0]
+    api_command = " ".join(str(part) for part in api_process["command"])
+    assert "agentseek-api dev" in api_command
+
+    api_checks = [
+        check
+        for check in lifecycle["checks"].values()
+        if check.get("service") in lifecycle["services"]
+        and lifecycle["services"][check["service"]].get("tech") == "agentseek-api"
+    ]
+    assert api_checks
+    assert any(check.get("service") is not None for check in api_checks)
+    assert all(check["target"].endswith(("/health", "/ok")) for check in api_checks)
+
+    graph_config = generated_path / "langgraph.json"
+    assert graph_config.is_file()
+    config_text = graph_config.read_text(encoding="utf-8")
+    assert "{{" not in config_text
+    try:
+        graph_data = json.loads(config_text)
+    except json.JSONDecodeError:
+        graph_data = tomllib.loads(config_text)
+    assert "graphs" in graph_data
+
+
+@pytest.mark.parametrize(
+    "template_key",
+    ["deepagents/content-builder", "deepagents/research"],
+)
+def test_agentseek_api_templates_render_local_seekdb_url(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+    env_example = (generated_path / ".env.example").read_text(encoding="utf-8")
+
+    assert "SEEKDB_URL=mysql+aiomysql://root:@127.0.0.1:2881/test" in env_example
+
+
+@pytest.mark.parametrize("template_key", ["deepagents/mcp", "langchain/rubric"])
+def test_embedded_seekdb_templates_declare_pyseekdb_extra(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+    pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert "pyobvector[pyseekdb]" in pyproject["project"]["dependencies"]
+
+
+def test_agentic_rag_renders_agentseek_embedded_seekdb_aliases(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "langchain/agentic-rag", output_root, tmp_path)
+    env_example = (generated_path / ".env.example").read_text(encoding="utf-8")
+
+    assert "SEEKDB_EMBED=true" in env_example
+    assert "SEEKDB_EMBED_DIR=" in env_example
+    assert "OCEANBASE_DB_NAME=" in env_example
+
+
 @pytest.mark.parametrize(("template_key", "template_root"), _registered_templates(), ids=sorted(INDEX))
 def test_registered_template_normalizes_to_reviewed_topology(
     template_key: str,
@@ -532,7 +647,10 @@ def test_relay_observability_render_runs_child_tests_with_dummy_credentials(tmp_
         "OPENAI_API_KEY": "test-openai-key",
         "TAVILY_API_KEY": "test-tavily-key",
         "RELAY_ENABLED": "false",
+        "UV_CACHE_DIR": str(tmp_path / "uv-cache"),
     }
+    for proxy_name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(proxy_name, None)
     sync = subprocess.run(
         ["uv", "sync", "--extra", "dev"],
         cwd=generated_path,
@@ -572,7 +690,10 @@ def test_deepagents_default_render_runs_child_tests(tmp_path: Path) -> None:
         **os.environ,
         "BUB_MODEL": "openai:test-model",
         "BUB_API_KEY": "test-api-key",
+        "UV_CACHE_DIR": str(tmp_path / "uv-cache"),
     }
+    for proxy_name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(proxy_name, None)
     sync = subprocess.run(
         ["uv", "sync", "--dev"],
         cwd=generated_path,
@@ -627,7 +748,8 @@ def test_cli_remote_local_dev_does_not_open_studio_implicitly(tmp_path: Path) ->
         project_root=generated_path,
     )
 
-    assert "--no-browser" in spec.processes["langgraph"].command
+    assert "agentseek-api" in spec.processes["langgraph"].command
+    assert "--no-browser" not in spec.processes["langgraph"].command
 
 
 def test_rubric_template_pins_characterized_runtime(tmp_path: Path) -> None:

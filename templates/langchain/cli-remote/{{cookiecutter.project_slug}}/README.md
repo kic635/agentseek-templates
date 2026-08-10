@@ -16,7 +16,7 @@ uvx agentseek dev
 uvx agentseek task --list
 ```
 
-`agentseek dev` 会按 `.agentseek/lifecycle.toml` 启动本地 LangGraph dev
+`agentseek dev` 会按 `.agentseek/lifecycle.toml` 启动本地 AgentSeek API
 server。运行中的服务检查也只由 lifecycle spec 声明；需要检查时运行：
 
 ```bash

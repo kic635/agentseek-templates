@@ -47,7 +47,7 @@ running, use `uvx agentseek doctor --live` to run the HTTP checks declared in
 
 ## Architecture
 
-- **Backend**: `create_deep_agent` with graph ID `sandbox` and a selectable Daytona or LangSmith Sandbox backend, served by `langgraph dev` on port {{ cookiecutter.langgraph_port }}
+- **Backend**: `create_deep_agent` with graph ID `sandbox` and a selectable Daytona or LangSmith Sandbox backend, served by `agentseek-api dev` on port {{ cookiecutter.langgraph_port }}
 - **Frontend**: React + Vite chat UI with streaming tool-call cards on port {{ cookiecutter.frontend_port }}
 
 The agent can execute shell commands, read/write files, and interact with the

@@ -35,7 +35,7 @@ graph = StateGraph(MessagesState).add_node("answer", answer).set_entry_point("an
 ## What's generated
 
 - **Backend** — a deterministic retrieve-then-generate graph backed by
-  `OceanbaseVectorStore`, served by `langgraph dev`.
+  `OceanbaseVectorStore`, served by `agentseek-api dev`.
 - **Frontend** — React + Vite chat UI with streamed message rendering and
   markdown support via `@langchain/react` `useStream`.
 - **Ingest CLI** — `uv run ingest` loads documents, embeds with OpenVINO, and

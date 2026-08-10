@@ -13,7 +13,7 @@ for the upstream integration overview.
 The generated project includes:
 
 - **Backend** — a `create_deep_agent` graph with the `sandbox` graph ID and a
-  selectable Daytona or LangSmith Sandbox backend, served by `langgraph dev`.
+  selectable Daytona or LangSmith Sandbox backend, served by `agentseek-api dev`.
   The agent can execute shell commands, read/write files, and interact with the
   filesystem inside an isolated sandbox.
 - **Frontend** — React + Vite chat UI with streaming tool-call cards, join &

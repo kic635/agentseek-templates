@@ -18,7 +18,7 @@ report.
 | `tavily_topic` | Tavily topic filter (`general`, `news`, or `finance`). |
 | `max_concurrent_research_units` | Max sub-agent tasks the orchestrator may queue concurrently. |
 | `max_researcher_iterations` | Max search/reflection loops per research unit. |
-| `langgraph_port` | Default backend port for `langgraph dev`. |
+| `langgraph_port` | Default backend port for `agentseek-api dev`. |
 | `frontend_port` | Default Vite dev-server port. |
 
 ## Generated layout
@@ -61,7 +61,7 @@ report.
 - Uses provider-first runtime config: generated apps select `openai`,
   `anthropic`, or `google_genai` in `.env`, then fill only the matching
   credential block.
-- Declares AgentSeek dev lifecycle v1 in `.agentseek/lifecycle.toml`, including
+- Declares AgentSeek dev lifecycle v2 in `.agentseek/lifecycle.toml`, including
   `info`, `doctor`, `dev`, and `task` entry points for local development.
 - Treats blank provider base URLs as "use the official endpoint", while still
   allowing custom compatible gateways per provider.

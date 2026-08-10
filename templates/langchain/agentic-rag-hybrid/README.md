@@ -54,5 +54,5 @@ Runtime-only secrets and endpoints belong in the generated `.env`, not in Cookie
 - Keep generated setup instructions on lifecycle tasks: `agentseek task sync`, `agentseek task frontend`, `agentseek task seekdb`, and `agentseek task ingest-sample`.
 - Use canonical `AGENTSEEK_MODEL_PROVIDER`, `AGENTSEEK_MODEL`, `AGENTSEEK_API_KEY`, and `AGENTSEEK_API_BASE` as the public model configuration. Provider-native names may remain compatibility aliases.
 - Keep backend and frontend servers loopback-only by default. Remote development must use `LANGGRAPH_HOST` and `FRONTEND_HOST` overrides, while the browser frontend derives backend URLs from `window.location.hostname`.
-- Keep mutable seekdb and media paths outside the generated project tree so `langgraph dev` does not reload while indexing files.
+- Keep mutable seekdb and media paths outside the generated project tree so `agentseek-api dev` does not reload while indexing files.
 - Update the focused smoke workflow when changes affect real seekdb ingestion, SiliconFlow embeddings, Phoenix tracing, or frontend compare behavior.

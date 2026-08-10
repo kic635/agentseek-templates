@@ -8,7 +8,7 @@ seekdb embed (384-dim, no API key required).
 The generated project includes:
 
 - **Backend** — a `create_agent` graph with a retrieval tool backed by
-  `OceanbaseVectorStore`, served by `langgraph dev`. The agent autonomously
+  `OceanbaseVectorStore`, served by `agentseek-api dev`. The agent autonomously
   decides when and how many times to search the knowledge base.
 - **Frontend** — React + Vite chat UI with streaming tool-call cards and
   markdown rendering via `@langchain/react` `useStream`.

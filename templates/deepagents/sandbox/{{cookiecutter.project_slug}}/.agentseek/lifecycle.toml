@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv", "node", "npm"]
+required = ["uv", "node", "npm", "agentseek-api"]
 
 [paths]
 required = ["pyproject.toml", "langgraph.json", "frontend/package.json", "frontend/node_modules"]
@@ -36,13 +36,13 @@ required = false
 description = "Required for the charged LangSmith Sandbox alternative or optional tracing."
 
 [services.backend]
-name = "LangGraph API"
+name = "AgentSeek API"
 url = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+tech = "agentseek-api"
 kind = "api"
 display = "advanced"
 primary = false
-description = "LangGraph development API that runs the sandbox-backed coding agent."
-tech = "langgraph"
+description = "AgentSeek API runtime that runs the sandbox-backed coding agent."
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
 
 [services.frontend]
@@ -56,7 +56,7 @@ tech = "vite"
 links = { docs = "https://vite.dev/guide/" }
 
 [processes.backend]
-command = ["uv", "run", "langgraph", "dev", "--no-browser", "--port", "{{ cookiecutter.langgraph_port }}"]
+command = ["uv", "run", "agentseek-api", "dev", "--port", "{{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -64,13 +64,15 @@ cwd = "frontend"
 
 [checks.backend]
 type = "http"
-target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/health"
+service = "backend"
 timeout = 2
 attempts = 3
 
 [checks.frontend]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.frontend_port }}"
+service = "frontend"
 timeout = 2
 attempts = 3
 

@@ -14,7 +14,9 @@ dependencies = [
     "mcp>=1.28,<2",
     "python-dotenv>=1.0",
     "starlette>=0.27",
-    "langgraph-cli[inmem]>=0.4",
+    "agentseek-api",
+    "pyobvector[pyseekdb]",
+    "mcp>=1.27.1,<2",
 ]
 
 [build-system]

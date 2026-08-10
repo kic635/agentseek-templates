@@ -1,4 +1,4 @@
-"""DeepAgents research graph, served by `langgraph dev`.
+"""DeepAgents research graph, served by `agentseek-api dev`.
 
 This module is pure deepagents + LangChain — no agentseek dependency. It
 mirrors the upstream ``langchain-ai/deepagents/examples/deep_research/agent.py``

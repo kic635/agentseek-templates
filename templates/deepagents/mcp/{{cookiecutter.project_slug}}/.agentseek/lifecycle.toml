@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv", "node", "npm"]
+required = ["uv", "node", "npm", "agentseek-api"]
 
 [paths]
 required = ["pyproject.toml", "langgraph.json", ".mcp.json", "frontend/package.json", "frontend/node_modules"]
@@ -29,7 +29,7 @@ description = "Provider-independent credential passed to the selected model adap
 [env.LANGGRAPH_HOST]
 required = false
 default = "127.0.0.1"
-description = "Bind address for the LangGraph development server."
+description = "Bind address for the AgentSeek API development server."
 
 [env.FRONTEND_HOST]
 required = false
@@ -37,12 +37,12 @@ default = "127.0.0.1"
 description = "Bind address for the Vite development server."
 
 [services.langgraph]
-name = "LangGraph API"
+name = "AgentSeek API"
 url = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+tech = "agentseek-api"
 kind = "api"
 display = "advanced"
-description = "LangGraph development API that runs the MCP-enabled DeepAgent."
-tech = "langgraph"
+description = "AgentSeek API runtime that runs the MCP-enabled DeepAgent."
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
 
 [services.frontend]
@@ -65,7 +65,7 @@ tech = "mcp"
 links = { docs = "https://modelcontextprotocol.io/docs/learn/server-concepts" }
 
 [processes.langgraph]
-command = ["uv", "run", "python", "-m", "{{ cookiecutter.project_slug }}.langgraph_dev"]
+command = ["uv", "run", "agentseek-api", "dev", "--port", "{{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -76,19 +76,22 @@ command = ["uv", "run", "python", "-m", "{{ cookiecutter.project_slug }}.calcula
 
 [checks.langgraph]
 type = "http"
-target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/health"
+service = "langgraph"
 timeout = 2
 attempts = 3
 
 [checks.frontend]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.frontend_port }}"
+service = "frontend"
 timeout = 2
 attempts = 3
 
 [checks.calculator-http]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.calculator_http_port }}/health"
+service = "calculator-http"
 timeout = 2
 attempts = 10
 

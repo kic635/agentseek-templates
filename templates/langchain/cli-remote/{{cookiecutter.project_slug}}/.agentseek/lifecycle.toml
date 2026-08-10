@@ -6,7 +6,7 @@ env_file = ".env"
 guide = "README.md"
 
 [tools]
-required = ["uv"]
+required = ["uv", "agentseek-api"]
 
 [paths]
 required = [
@@ -53,11 +53,11 @@ kind = "api"
 display = "default"
 primary = true
 description = "LangGraph Agent Server endpoint used by the Bub bridge."
-tech = "langgraph"
+tech = "agentseek-api"
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/local-server", api_docs = "{{ cookiecutter.langgraph_url }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl={{ cookiecutter.langgraph_url }}" }
 
 [processes.langgraph]
-command = ["uv", "run", "langgraph", "dev", "--no-browser"]
+command = ["uv", "run", "agentseek-api", "dev"]
 {% if cookiecutter.langgraph_url != "http://127.0.0.1:2024" %}
 provides = []
 {% endif %}
@@ -65,6 +65,7 @@ provides = []
 [checks.langgraph]
 type = "http"
 target = "{{ cookiecutter.langgraph_url }}/ok"
+service = "langgraph"
 timeout = 2
 attempts = 3
 

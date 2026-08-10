@@ -6,7 +6,7 @@ __pycache__/
 build/
 dist/
 
-# langgraph dev in-memory checkpoint state
+# AgentSeek API development checkpoint state
 .langgraph_api/
 
 # Node

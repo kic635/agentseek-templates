@@ -18,7 +18,7 @@ Scaffolded with `agentseek create langchain/agentic-rag-openvino`.
 │              → deterministic retrieve-then-generate graph │
 │  Embedding:  HuggingFaceEmbeddings(backend="openvino")   │
 │  Vector DB:  OceanBase seekdb                            │
-│  Serving:    langgraph dev → React frontend              │
+│  Serving:    agentseek-api dev → React frontend          │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -140,7 +140,7 @@ agentseek dev --dry-run
 agentseek dev
 ```
 
-`agentseek dev` starts OceanBase seekdb, `langgraph dev`, and the Vite frontend from the
+`agentseek dev` starts OceanBase seekdb, `agentseek-api dev`, and the Vite frontend from the
 lifecycle spec. In another terminal, use `agentseek doctor --live` to check the
 declared HTTP endpoints.
 

@@ -10,7 +10,7 @@ spec. The generated project runs through `agentseek info`, `agentseek doctor`,
 ```text
 agentseek dev
   -> .agentseek/lifecycle.toml
-    -> uv run langgraph dev --port {{ langgraph_port }} --no-browser
+    -> uv run agentseek-api dev --port {{ langgraph_port }}
     -> npm run dev (frontend/)
 ```
 
@@ -18,7 +18,7 @@ Two long-running processes start in development:
 
 | Process | Default port | Role |
 | --- | --- | --- |
-| `uv run langgraph dev --port {{ langgraph_port }} --no-browser` | `{{ langgraph_port }}` | Serves the DeepAgents graph and image routes. |
+| `uv run agentseek-api dev --port {{ langgraph_port }}` | `{{ langgraph_port }}` | Serves the DeepAgents graph and image routes. |
 | `npm run dev` | `{{ frontend_port }}` | Serves the Vite + React frontend. |
 
 Project setup tasks are declared in `.agentseek/lifecycle.toml` and exposed
@@ -36,7 +36,7 @@ through `agentseek task --list`.
 | `google_image_model` | Gemini model for image generation. Ships as `gemini-3.1-flash-image-preview`. |
 | `tavily_max_results` | Default `web_search` result limit. |
 | `tavily_topic` | Tavily topic filter (`general` or `news`). |
-| `langgraph_port` | Default backend port for `langgraph dev`. |
+| `langgraph_port` | Default backend port for `agentseek-api dev`. |
 | `frontend_port` | Default Vite dev-server port. |
 
 ## Generated layout
