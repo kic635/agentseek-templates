@@ -65,7 +65,7 @@ tech = "mcp"
 links = { docs = "https://modelcontextprotocol.io/docs/learn/server-concepts" }
 
 [processes.langgraph]
-command = ["uv", "run", "agentseek-api", "dev", "--port", "{{ cookiecutter.langgraph_port }}"]
+command = ["sh", "-lc", "uv run agentseek-api dev --host ${LANGGRAPH_HOST:-127.0.0.1} --port {{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]

@@ -473,7 +473,8 @@ def test_migrated_templates_declare_agentseek_api_runtime_and_dependency(
         if (generated_path / "requirements.txt").is_file()
         else ""
     )
-    assert "agentseek-api" in dependencies or "agentseek-api" in requirements
+    has_agentseek_api = any(dependency.startswith("agentseek-api") for dependency in dependencies)
+    assert has_agentseek_api or "agentseek-api" in requirements
     assert "mcp>=1.27.1,<2" in dependencies
 
 
@@ -579,6 +580,26 @@ def test_agentic_rag_renders_agentseek_embedded_seekdb_aliases(tmp_path: Path) -
     assert "SEEKDB_EMBED=true" in env_example
     assert "SEEKDB_EMBED_DIR=" in env_example
     assert "OCEANBASE_DB_NAME=" in env_example
+
+
+def test_markdown_messages_declares_embedded_seekdb_for_agentseek_api(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "langchain/markdown-messages", output_root, tmp_path)
+    env_example = (generated_path / ".env.example").read_text(encoding="utf-8")
+    assert "SEEKDB_EMBED=true" in env_example
+    assert "SEEKDB_EMBED_DIR=" in env_example
+    assert "OCEANBASE_DB_NAME=test" in env_example
+    pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    assert "agentseek-api[embedded]" in pyproject["project"]["dependencies"]
+
+
+def test_openvino_requires_agentseek_api_supported_python(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "langchain/agentic-rag-openvino", output_root, tmp_path)
+    project = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    assert project["project"]["requires-python"] == ">=3.12"
 
 
 @pytest.mark.parametrize(("template_key", "template_root"), _registered_templates(), ids=sorted(INDEX))
@@ -1058,3 +1079,19 @@ def test_rubric_generated_smoke_job_exercises_fresh_keyless_project() -> None:
     assert env_copy_position < job.index("agentseek dev --dry-run")
     assert "RUBRIC_API_KEY" not in job
     assert "secrets." not in job
+
+
+def test_markdown_messages_generated_smoke_uses_declared_embedded_runtime() -> None:
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+    marker = "\n  markdown-messages-generated-api-smoke:\n"
+
+    assert marker in workflow
+    job = workflow.split(marker, maxsplit=1)[1]
+    assert "uv sync" in job
+    assert "OPENAI_API_KEY=smoke-test-key" in job
+    assert "LANGSMITH_TRACING=false" in job
+    assert "fake_openai_server.py" in job
+    assert "uv run agentseek-api dev --port 2024" in job
+    assert "http://127.0.0.1:2024/health" in job
+    assert "POST http://127.0.0.1:2024/assistants/search" in job
+    assert "/threads/${thread_id}/runs" in job

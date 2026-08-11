@@ -204,3 +204,55 @@ jobs:
           uv run --project "${GITHUB_WORKSPACE}" agentseek info
           uv run --project "${GITHUB_WORKSPACE}" agentseek doctor
           uv run --project "${GITHUB_WORKSPACE}" agentseek dev --dry-run
+
+  markdown-messages-generated-api-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.9.28"
+          enable-cache: true
+      - run: uv sync --frozen --dev
+      - name: Render and install the declared backend dependencies
+        run: |
+          uv run cookiecutter templates/langchain/markdown-messages --no-input --output-dir "${RUNNER_TEMP}/markdown-render"
+          cd "${RUNNER_TEMP}/markdown-render/markdown_messages_agent"
+          cp .env.example .env
+          sed -i 's/^OPENAI_API_KEY=$/OPENAI_API_KEY=smoke-test-key/' .env
+          sed -i 's|^OPENAI_API_BASE=$|OPENAI_API_BASE=http://127.0.0.1:2025/v1|' .env
+          sed -i 's/^LANGSMITH_TRACING=true/LANGSMITH_TRACING=false/' .env
+          uv sync
+      - name: Start the generated backend and exercise the API contract
+        working-directory: ${{ runner.temp }}/markdown-render/markdown_messages_agent
+        run: |
+          set -euo pipefail
+          python "${GITHUB_WORKSPACE}/scripts/fake_openai_server.py" > "${RUNNER_TEMP}/fake-openai.log" 2>&1 &
+          provider_pid=$!
+          uv run agentseek-api dev --port 2024 > "${RUNNER_TEMP}/markdown-api.log" 2>&1 &
+          api_pid=$!
+          trap 'kill "${api_pid}" "${provider_pid}" || true; cat "${RUNNER_TEMP}/markdown-api.log"; cat "${RUNNER_TEMP}/fake-openai.log"' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:2024/health > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent http://127.0.0.1:2024/health > /dev/null
+          curl --fail --silent --request POST http://127.0.0.1:2024/assistants/search \
+            --header 'content-type: application/json' --data '{"limit": 1}' > assistants.json
+          test -s assistants.json
+          assistant_id=$(python -c 'import json; print(json.load(open("assistants.json"))[0]["assistant_id"])')
+          thread_id=$(curl --fail --silent --request POST http://127.0.0.1:2024/threads --header 'content-type: application/json' --data '{"metadata":{"suite":"markdown-smoke"}}' | python -c 'import json, sys; print(json.load(sys.stdin)["thread_id"])')
+          curl --fail --silent --request POST "http://127.0.0.1:2024/threads/${thread_id}/runs" \
+            --header 'content-type: application/json' \
+            --data "{\"assistant_id\":\"${assistant_id}\",\"input\":{\"message\":\"hello smoke\"}}" > run.json
+          run_id=$(python -c 'import json; print(json.load(open("run.json"))["run_id"])')
+          curl --fail --silent "http://127.0.0.1:2024/threads/${thread_id}/runs/${run_id}/wait" > run-result.json
+          python -c 'import json; assert json.load(open("run-result.json"))["status"] == "success"'

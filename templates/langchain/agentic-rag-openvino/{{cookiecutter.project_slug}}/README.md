@@ -53,9 +53,9 @@ template tasks.
 
 ## Setup
 
-> **Python 3.10+ required** (not 3.12+). OpenVINO runtime and
-> `optimum[openvino]` have limited Python 3.13+ support, so this template
-> uses `requires-python = ">=3.10"`.
+> **Python 3.12+ required.** This matches the supported Python floor of
+> `agentseek-api`; use Python 3.12 when the local OpenVINO stack does not yet
+> support a newer interpreter.
 >
 > **Node.js 20+ recommended** for the Vite frontend dependencies.
 

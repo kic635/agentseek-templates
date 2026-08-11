@@ -102,10 +102,9 @@ belongs to the APAC or another non-default region (for example
 to the cloud.
 
 All three development processes bind to loopback by default. `LANGGRAPH_HOST`
-controls LangGraph from the launching shell. `FRONTEND_HOST` controls Vite from
-that shell or `frontend/.env`. The calculator HTTP server remains loopback-only.
-Do not add these controls to the root `.env`; it is reserved for application,
-model, MCP, and tracing settings.
+controls the AgentSeek API bind address and `FRONTEND_HOST` controls Vite. Set
+either in the launching shell or root `.env`; explicitly exported shell values
+take precedence. The calculator HTTP server remains loopback-only.
 
 The frontend derives `http://<browser-host>:2024` by default. For an HTTPS
 frontend or a reverse proxy that changes the backend's public scheme, port, or
