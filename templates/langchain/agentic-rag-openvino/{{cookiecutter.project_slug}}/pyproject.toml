@@ -12,7 +12,7 @@ dependencies = [
     "langchain-huggingface>=1.0",
     "langchain-oceanbase>=0.1.0",
     "langchain-text-splitters>=0.3.0",
-    "agentseek-api",
+    "agentseek-api[embedded]",
     "mcp>=1.27.1,<2",
     "optimum[openvino]>=1.19",
     "pypdf",

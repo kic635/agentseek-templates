@@ -5,6 +5,21 @@ description = "Bub CLI agent that bridges to a LangGraph Agent Server through ag
 env_file = ".env"
 guide = "README.md"
 
+[env.SEEKDB_EMBED]
+required = true
+default = "true"
+description = "Use embedded AgentSeek API checkpoint persistence for local development."
+
+[env.SEEKDB_EMBED_DIR]
+required = true
+default = "~/.agentseek/{{ cookiecutter.project_slug }}/seekdb"
+description = "Embedded AgentSeek API persistence directory."
+
+[env.OCEANBASE_DB_NAME]
+required = true
+default = "test"
+description = "Embedded AgentSeek API database name."
+
 [tools]
 required = ["uv"]
 

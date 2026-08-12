@@ -9,7 +9,7 @@ dependencies = [
     "langchain>=1.0.0",
     "langchain-openai>=0.3.0",
     "httpx[socks]>=0.28",
-    "agentseek-api",
+    "agentseek-api[embedded]",
     "mcp>=1.27.1,<2",
     "pydantic-settings>=2.0.0",
 ]

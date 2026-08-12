@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -29,6 +30,18 @@ MIGRATED_RUNTIME_TEMPLATES = {
     "langchain/agentic-rag-openvino",
     "langchain/cli-remote",
     "langchain/markdown-messages",
+    "langchain/rubric",
+}
+# Reviewer #14's local-runtime proof explicitly covers these seven templates.
+# The two RAG variants below remain separately covered by catalog/lifecycle
+# tests until their full runtime smoke is intentionally enabled in CI.
+REVIEWER_LOCAL_RUNTIME_TEMPLATES = {
+    "deepagents/content-builder",
+    "deepagents/mcp",
+    "deepagents/research",
+    "deepagents/sandbox",
+    "langchain/agentic-rag-hybrid",
+    "langchain/cli-remote",
     "langchain/rubric",
 }
 EXPECTED_CORE_DEPENDENCIES = {
@@ -463,7 +476,11 @@ def test_migrated_templates_declare_agentseek_api_runtime_and_dependency(
     lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
     processes = lifecycle["processes"]
     commands = [" ".join(str(part) for part in process["command"]) for process in processes.values()]
-    assert any("agentseek-api" in command and " dev" in command for command in commands)
+    assert any(
+        ("agentseek-api" in command and " dev" in command)
+        or (template_key == "deepagents/mcp" and "langgraph_dev" in command)
+        for command in commands
+    )
     assert all("langgraph dev" not in command for command in commands)
 
     pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
@@ -495,9 +512,105 @@ def test_migrated_templates_resolve_api_through_uv_without_path_activation(
         " ".join(str(part) for part in process["command"])
         for process in lifecycle["processes"].values()
         if "agentseek-api" in " ".join(str(part) for part in process["command"])
+        or (template_key == "deepagents/mcp" and "langgraph_dev" in " ".join(str(part) for part in process["command"]))
     ]
     assert len(api_commands) == 1
-    assert "uv run agentseek-api dev" in api_commands[0]
+    if template_key == "deepagents/mcp":
+        assert api_commands[0].startswith("uv run python -m")
+    else:
+        assert "uv run agentseek-api dev" in api_commands[0]
+
+
+@pytest.mark.parametrize("template_key", sorted(REVIEWER_LOCAL_RUNTIME_TEMPLATES))
+def test_migrated_local_api_templates_declare_embedded_persistence(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+
+    pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = pyproject["project"].get("dependencies", [])
+    assert any(dependency.startswith("agentseek-api[embedded]") for dependency in dependencies)
+
+    requirements_path = generated_path / "requirements.txt"
+    if requirements_path.is_file():
+        assert "agentseek-api[embedded]" in requirements_path.read_text(encoding="utf-8")
+
+    env_example = (generated_path / ".env.example").read_text(encoding="utf-8")
+    assert "SEEKDB_EMBED=true" in env_example
+    assert "SEEKDB_EMBED_DIR=" in env_example
+    assert "OCEANBASE_DB_NAME=" in env_example
+
+    env_values = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in env_example.splitlines()
+        if line and not line.startswith("#") and "=" in line
+    }
+    lifecycle_path = generated_path / ".agentseek" / "lifecycle.toml"
+    lifecycle_text = lifecycle_path.read_text(encoding="utf-8")
+    lifecycle = tomllib.loads(lifecycle_text)
+    assert "{{" not in env_example + lifecycle_text + (generated_path / "pyproject.toml").read_text(encoding="utf-8")
+    lifecycle_env = lifecycle["env"]
+    for name in ("SEEKDB_EMBED", "SEEKDB_EMBED_DIR", "OCEANBASE_DB_NAME"):
+        assert name in lifecycle_env
+        assert str(lifecycle_env[name]["default"]) == env_values[name]
+
+    if template_key == "langchain/agentic-rag-hybrid":
+        assert env_values["SEEKDB_EMBED_DIR"] != env_values["SEEKDB_PATH"]
+
+
+@pytest.mark.parametrize("template_key", ["deepagents/mcp"])
+def test_migrated_local_api_lifecycle_has_no_posix_shell(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+    lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
+
+    commands = [
+        [str(part) for part in process["command"]]
+        for process in lifecycle["processes"].values()
+        if "agentseek-api" in " ".join(str(part) for part in process["command"])
+        or "langgraph_dev" in " ".join(str(part) for part in process["command"])
+    ]
+    assert commands
+    assert all(command[:2] not in (["sh", "-lc"], ["bash", "-lc"]) for command in commands)
+
+
+def test_deepagents_mcp_uses_cross_platform_host_wrapper(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "deepagents/mcp", output_root, tmp_path)
+    lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
+
+    command = lifecycle["processes"]["langgraph"]["command"]
+    assert command[:5] == ["uv", "run", "python", "-m", f"{generated_path.name}.langgraph_dev"]
+    wrapper = generated_path / "src" / generated_path.name / "langgraph_dev.py"
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    assert "LANGGRAPH_HOST" in wrapper_text
+    assert '"--host"' in wrapper_text
+
+
+def test_deepagents_mcp_wrapper_builds_argv_without_shell(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "deepagents/mcp", output_root, tmp_path)
+    wrapper = generated_path / "src" / generated_path.name / "langgraph_dev.py"
+    spec = importlib.util.spec_from_file_location("generated_langgraph_dev", wrapper)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls: list[list[str]] = []
+    monkeypatch.setenv("LANGGRAPH_HOST", "0.0.0.0")
+    monkeypatch.setattr(module.shutil, "which", lambda name: "/fake/agentseek-api")
+    monkeypatch.setattr(module.subprocess, "call", lambda command: calls.append(command) or 17)
+
+    assert module.main() == 17
+    assert calls == [["/fake/agentseek-api", "dev", "--host", "0.0.0.0", "--port", "2024"]]
 
 
 @pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
@@ -515,11 +628,15 @@ def test_migrated_templates_expose_api_health_and_preserve_graph_config(
         process
         for process in lifecycle["processes"].values()
         if "agentseek-api" in " ".join(str(part) for part in process["command"])
+        or (template_key == "deepagents/mcp" and "langgraph_dev" in " ".join(str(part) for part in process["command"]))
     ]
     assert len(api_processes) == 1
     api_process = api_processes[0]
     api_command = " ".join(str(part) for part in api_process["command"])
-    assert "agentseek-api dev" in api_command
+    if template_key == "deepagents/mcp":
+        assert api_command.startswith("uv run python -m")
+    else:
+        assert "agentseek-api dev" in api_command
 
     api_checks = [
         check
@@ -555,7 +672,9 @@ def test_agentseek_api_templates_render_local_seekdb_url(
     generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
     env_example = (generated_path / ".env.example").read_text(encoding="utf-8")
 
-    assert "SEEKDB_URL=mysql+aiomysql://root:@127.0.0.1:2881/test" in env_example
+    assert "SEEKDB_EMBED=true" in env_example
+    assert "SEEKDB_EMBED_DIR=" in env_example
+    assert "OCEANBASE_DB_NAME=test" in env_example
 
 
 @pytest.mark.parametrize("template_key", ["deepagents/mcp", "langchain/rubric"])
@@ -840,6 +959,9 @@ def test_rubric_example_exposes_the_provider_native_live_model_contract(tmp_path
         "LANGSMITH_TRACING": "false",
         "LANGSMITH_API_KEY": "",
         "LANGSMITH_PROJECT": "",
+        "SEEKDB_EMBED": "true",
+        "SEEKDB_EMBED_DIR": "~/.agentseek/rubric_lab/seekdb",
+        "OCEANBASE_DB_NAME": "test",
     }
 
 
@@ -1095,3 +1217,40 @@ def test_markdown_messages_generated_smoke_uses_declared_embedded_runtime() -> N
     assert "http://127.0.0.1:2024/health" in job
     assert "POST http://127.0.0.1:2024/assistants/search" in job
     assert "/threads/${thread_id}/runs" in job
+
+
+def test_reviewer_local_runtime_matrix_matches_rendered_template_set() -> None:
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+    matrix = workflow.split("  migrated-local-runtime-matrix:", maxsplit=1)[1]
+    matrix_templates = {
+        line.strip().split(":", maxsplit=1)[1].strip()
+        for line in matrix.splitlines()
+        if line.strip().startswith("- template:")
+    }
+    assert matrix_templates >= REVIEWER_LOCAL_RUNTIME_TEMPLATES
+    assert matrix_templates <= set(INDEX)
+    assert "template: deepagents/mcp\n            os: ubuntu-latest" in matrix
+    assert "template: deepagents/mcp\n            os: windows-latest" in matrix
+    for template_key in REVIEWER_LOCAL_RUNTIME_TEMPLATES:
+        assert (TEMPLATES_ROOT / template_key).is_dir()
+    assert '--template "${{ matrix.template }}"' in matrix
+    assert '"${{ runner.temp }}/generated-runtime"' in matrix
+
+
+def test_runtime_floor_smoke_rejects_empty_versions() -> None:
+    script = REPOSITORY_ROOT / "scripts" / "runtime_floor_smoke.py"
+    for option in ("--agentseek-api-version", "--pydantic-settings-version"):
+        completed = subprocess.run(
+            [sys.executable, str(script), option, "", "--pydantic-settings-version", "2.0.0"]
+            if option == "--agentseek-api-version"
+            else [sys.executable, str(script), "--agentseek-api-version", "0.0.0", option, ""],
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode != 0
+
+
+def test_runtime_floor_smoke_uses_public_main_app_import() -> None:
+    script = (REPOSITORY_ROOT / "scripts" / "runtime_floor_smoke.py").read_text(encoding="utf-8")
+    assert "from agentseek_api.main import app" in script
+    assert "from agentseek_api.cli import app" not in script

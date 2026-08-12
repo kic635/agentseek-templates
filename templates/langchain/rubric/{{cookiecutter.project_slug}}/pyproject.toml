@@ -11,7 +11,7 @@ dependencies = [
     "langchain-google-genai>=4.2,<5",
     "langchain-openai>=1.1,<2",
     "langgraph==1.2.10",
-    "agentseek-api",
+    "agentseek-api[embedded]",
     "pyobvector[pyseekdb]",
     "mcp>=1.27.1,<2",
     "python-dotenv>=1.0,<2",

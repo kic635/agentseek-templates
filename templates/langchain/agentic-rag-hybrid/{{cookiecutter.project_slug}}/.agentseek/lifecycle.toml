@@ -5,6 +5,21 @@ description = "Multimodal LangGraph RAG lab for comparing semantic, keyword, exa
 env_file = ".env"
 guide = "README.md"
 
+[env.SEEKDB_EMBED]
+required = true
+default = "true"
+description = "Use embedded AgentSeek API checkpoint persistence."
+
+[env.SEEKDB_EMBED_DIR]
+required = true
+default = "~/.agentseek/{{ cookiecutter.project_slug }}/agentseek-api"
+description = "Embedded AgentSeek API persistence directory, separate from RAG data."
+
+[env.OCEANBASE_DB_NAME]
+required = true
+default = "agentseek_api"
+description = "Embedded AgentSeek API database name."
+
 [tools]
 required = ["uv", "node", "npm"]
 

@@ -256,3 +256,52 @@ jobs:
           run_id=$(python -c 'import json; print(json.load(open("run.json"))["run_id"])')
           curl --fail --silent "http://127.0.0.1:2024/threads/${thread_id}/runs/${run_id}/wait" > run-result.json
           python -c 'import json; assert json.load(open("run-result.json"))["status"] == "success"'
+
+  migrated-local-runtime-matrix:
+    name: ${{ matrix.template }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - template: deepagents/content-builder
+            os: ubuntu-latest
+          - template: deepagents/mcp
+            os: ubuntu-latest
+          - template: deepagents/mcp
+            os: windows-latest
+          - template: deepagents/research
+            os: ubuntu-latest
+          - template: deepagents/sandbox
+            os: ubuntu-latest
+          - template: langchain/agentic-rag-hybrid
+            os: ubuntu-latest
+          - template: langchain/cli-remote
+            os: ubuntu-latest
+          - template: langchain/markdown-messages
+            os: ubuntu-latest
+          - template: langchain/rubric
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e
+        with:
+          version: "0.9.28"
+          enable-cache: true
+      - run: uv sync --frozen --dev
+      - name: Render, install, and exercise the generated lifecycle
+        env:
+          SMOKE_TEMPLATE: ${{ matrix.template }}
+        run: >-
+          uv run python scripts/generated_runtime_smoke.py
+          --template "${{ matrix.template }}"
+          --output-root "${{ runner.temp }}/generated-runtime"
