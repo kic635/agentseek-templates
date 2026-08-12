@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -74,7 +75,10 @@ def _terminate(process: subprocess.Popen[bytes]) -> None:
             stderr=subprocess.DEVNULL,
         )
     else:
-        os.killpg(process.pid, signal.SIGTERM)
+        # The child can exit between poll() and killpg(). Its process group
+        # disappearing means cleanup has already completed.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
     try:
         process.wait(timeout=10)
     except subprocess.TimeoutExpired:
