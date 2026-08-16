@@ -13,7 +13,7 @@ dependencies = [
     "langchain-oceanbase[pyseekdb]>=0.6.0",
     "langchain-openai>=0.3",
     "langchain-text-splitters>=0.3.0",
-    "agentseek-api[embedded]",
+    "agentseek-api[embedded]==0.2.2",
     "mcp>=1.27.1,<2",
     "python-dotenv>=1.0",
     "requests",

@@ -20,6 +20,8 @@ TEMPLATES_ROOT = REPOSITORY_ROOT / "templates"
 INDEX = json.loads((TEMPLATES_ROOT / "index.json").read_text(encoding="utf-8"))
 CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
 CORE_COMMIT = "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc"
+AGENTSEEK_API_VERSION = "0.2.2"
+AGENTSEEK_API_DEPENDENCY = f"agentseek-api[embedded]=={AGENTSEEK_API_VERSION}"
 MIGRATED_RUNTIME_TEMPLATES = {
     "deepagents/content-builder",
     "deepagents/mcp",
@@ -463,6 +465,25 @@ def test_registered_template_renders_as_complete_lifecycle_v2(
 
 
 @pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
+def test_migrated_templates_pin_the_published_api_release(
+    template_key: str,
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
+    project = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    api_dependencies = [item for item in project["project"].get("dependencies", []) if item.startswith("agentseek-api")]
+    assert api_dependencies == [AGENTSEEK_API_DEPENDENCY]
+
+    requirements = generated_path / "requirements.txt"
+    if requirements.is_file() and template_key == "langchain/cli-remote":
+        lines = {line.strip() for line in requirements.read_text(encoding="utf-8").splitlines() if line.strip()}
+        api_lines = {line for line in lines if line.startswith("agentseek-api")}
+        assert api_lines == {AGENTSEEK_API_DEPENDENCY}
+
+
+@pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
 def test_migrated_templates_declare_agentseek_api_runtime_and_dependency(
     template_key: str,
     tmp_path: Path,
@@ -707,7 +728,7 @@ def test_markdown_messages_declares_embedded_seekdb_for_agentseek_api(tmp_path: 
     assert "SEEKDB_EMBED_DIR=" in env_example
     assert "OCEANBASE_DB_NAME=test" in env_example
     pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
-    assert "agentseek-api[embedded]" in pyproject["project"]["dependencies"]
+    assert AGENTSEEK_API_DEPENDENCY in pyproject["project"]["dependencies"]
 
 
 def test_openvino_remains_on_its_reviewed_runtime_until_a_model_fixture_exists(tmp_path: Path) -> None:
