@@ -399,6 +399,17 @@ def _assert_exact_agentseek_api_dependency(requirements: list[str]) -> None:
     )
 
 
+def _assert_exact_api_pin_contract(generated_path: Path, template_key: str) -> None:
+    project = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    _assert_exact_agentseek_api_dependency(project["project"].get("dependencies", []))
+
+    requirements = generated_path / "requirements.txt"
+    if template_key == "langchain/cli-remote":
+        assert requirements.is_file(), "agentseek-api requirements.txt is missing for langchain/cli-remote"
+        lines = [line.strip() for line in requirements.read_text(encoding="utf-8").splitlines() if line.strip()]
+        _assert_exact_agentseek_api_dependency(lines)
+
+
 def _registered_templates() -> list[tuple[str, Path]]:
     return [(key, TEMPLATES_ROOT / key) for key in sorted(INDEX)]
 
@@ -487,14 +498,7 @@ def test_migrated_templates_pin_the_published_api_release(
     output_root = tmp_path / "output"
     output_root.mkdir()
     generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
-    project = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
-    _assert_exact_agentseek_api_dependency(project["project"].get("dependencies", []))
-
-    requirements = generated_path / "requirements.txt"
-    if template_key == "langchain/cli-remote":
-        assert requirements.is_file(), "agentseek-api requirements.txt is missing for langchain/cli-remote"
-        lines = [line.strip() for line in requirements.read_text(encoding="utf-8").splitlines() if line.strip()]
-        _assert_exact_agentseek_api_dependency(lines)
+    _assert_exact_api_pin_contract(generated_path, template_key)
 
 
 def _write_exact_pin_contract_fixture(
@@ -531,41 +535,38 @@ def _write_exact_pin_contract_fixture(
 def test_exact_api_pin_contract_rejects_invalid_cli_requirements(
     requirements: str | None,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generated = _write_exact_pin_contract_fixture(
         tmp_path,
         ["agentseek-api[embedded]==0.2.2"],
         requirements,
     )
-    monkeypatch.setitem(sys.modules[__name__].__dict__, "_render", lambda *_args, **_kwargs: generated)
 
     with pytest.raises(AssertionError, match="agentseek-api"):
-        test_migrated_templates_pin_the_published_api_release("langchain/cli-remote", tmp_path)
+        _assert_exact_api_pin_contract(generated, "langchain/cli-remote")
 
 
 @pytest.mark.parametrize(
     "dependencies",
     [
+        [],
         ["agentseek-api[embedded]==0.2.2", "agentseek-api[embedded]==0.2.2"],
         ["agentseek-api[embedded]==0.2.2", "AgentSeek_API[embedded]>=0.2"],
     ],
-    ids=["duplicate", "pep503-equivalent-conflict"],
+    ids=["missing", "duplicate", "pep503-equivalent-conflict"],
 )
 def test_exact_api_pin_contract_rejects_invalid_pyproject_dependencies(
     dependencies: list[str],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     generated = _write_exact_pin_contract_fixture(
         tmp_path,
         dependencies,
         "agentseek-api[embedded]==0.2.2\n",
     )
-    monkeypatch.setitem(sys.modules[__name__].__dict__, "_render", lambda *_args, **_kwargs: generated)
 
     with pytest.raises(AssertionError, match="agentseek-api"):
-        test_migrated_templates_pin_the_published_api_release("langchain/cli-remote", tmp_path)
+        _assert_exact_api_pin_contract(generated, "langchain/cli-remote")
 
 
 @pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
