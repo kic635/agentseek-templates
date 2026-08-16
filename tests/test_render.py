@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import inspect
 import json
 import os
 import shutil
 import subprocess
 import sys
 import tomllib
+import types
 from pathlib import Path
 
 import pytest
@@ -715,6 +718,86 @@ def test_deepagents_mcp_wrapper_builds_argv_without_shell(tmp_path: Path, monkey
 
     assert module.main() == 17
     assert calls == [["/fake/agentseek-api", "dev", "--host", "0.0.0.0", "--port", "2024"]]
+
+
+def test_deepagents_mcp_graph_factory_is_sync_inside_running_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "deepagents/mcp", output_root, tmp_path)
+    project_slug = generated_path.name
+    agent_path = generated_path / "src" / project_slug / "agent.py"
+
+    class FakeCompiledStateGraph:
+        pass
+
+    class FakeProfile:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    expected_graph = FakeCompiledStateGraph()
+    load_calls = 0
+
+    async def fake_load_mcp_tools(config: object) -> types.SimpleNamespace:
+        nonlocal load_calls
+        load_calls += 1
+        await asyncio.sleep(0)
+        return types.SimpleNamespace(client=object(), tools=(object(),), tool_names=("add",))
+
+    deepagents = types.ModuleType("deepagents")
+    deepagents.GeneralPurposeSubagentProfile = FakeProfile
+    deepagents.HarnessProfile = FakeProfile
+    deepagents.create_deep_agent = lambda **kwargs: expected_graph
+    deepagents.register_harness_profile = lambda *args: None
+
+    langgraph = types.ModuleType("langgraph")
+    langgraph_graph = types.ModuleType("langgraph.graph")
+    langgraph_state = types.ModuleType("langgraph.graph.state")
+    langgraph_state.CompiledStateGraph = FakeCompiledStateGraph
+
+    project_package = types.ModuleType(project_slug)
+    project_package.__path__ = [str(generated_path / "src" / project_slug)]
+    config_module = types.ModuleType(f"{project_slug}.config")
+    config_module.load_mcp_config = lambda path: object()
+    mcp_tools_module = types.ModuleType(f"{project_slug}.mcp_tools")
+    mcp_tools_module.load_mcp_tools = fake_load_mcp_tools
+    model_module = types.ModuleType(f"{project_slug}.model")
+    model_module.resolve_model_binding = lambda: types.SimpleNamespace(
+        profile_key="test-profile",
+        model=object(),
+    )
+
+    for name, stub in {
+        "deepagents": deepagents,
+        "langgraph": langgraph,
+        "langgraph.graph": langgraph_graph,
+        "langgraph.graph.state": langgraph_state,
+        project_slug: project_package,
+        f"{project_slug}.config": config_module,
+        f"{project_slug}.mcp_tools": mcp_tools_module,
+        f"{project_slug}.model": model_module,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, stub)
+
+    module_name = f"{project_slug}.agent_under_test"
+    spec = importlib.util.spec_from_file_location(module_name, agent_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+
+    async def call_factory_from_api_loop() -> object:
+        return module.make_graph()
+
+    graph = asyncio.run(call_factory_from_api_loop())
+    if inspect.iscoroutine(graph):
+        graph.close()
+
+    assert graph is expected_graph
+    assert module.make_graph() is expected_graph
+    assert load_calls == 1
 
 
 @pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))

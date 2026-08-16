@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +31,7 @@ class RuntimeBundle:
 
 
 _runtime: RuntimeBundle | None = None
-_runtime_lock = asyncio.Lock()
+_runtime_lock = threading.Lock()
 
 
 async def _build_runtime() -> RuntimeBundle:
@@ -57,12 +59,19 @@ async def _build_runtime() -> RuntimeBundle:
     )
 
 
-async def make_graph() -> CompiledStateGraph:
+def _build_runtime_in_worker() -> RuntimeBundle:
+    return asyncio.run(_build_runtime())
+
+
+def make_graph() -> CompiledStateGraph:
     """Return the cached graph, building one complete runtime on first use."""
     global _runtime
     if _runtime is not None:
         return _runtime.graph
-    async with _runtime_lock:
+    with _runtime_lock:
         if _runtime is None:
-            _runtime = await _build_runtime()
+            # AgentSeek API 0.2.2 invokes graph factories synchronously from an
+            # async request. Use a worker so MCP discovery can own its event loop.
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-graph-build") as executor:
+                _runtime = executor.submit(_build_runtime_in_worker).result()
         return _runtime.graph
