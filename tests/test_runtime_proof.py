@@ -7,6 +7,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import urllib.error
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -385,6 +386,38 @@ def test_download_published_wheel_bounds_transport_retries(tmp_path: Path, monke
     assert attempts == proof.DOWNLOAD_ATTEMPTS
 
 
+def test_download_published_wheel_does_not_publish_a_partial_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = b"published universal wheel"
+    metadata = _metadata("agentseek", "0.1.2", wheel)
+
+    def download(url: str) -> bytes:
+        if url == "https://pypi.org/pypi/agentseek/0.1.2/json":
+            return json.dumps(metadata).encode()
+        return wheel
+
+    real_write = os.write
+    write_calls = 0
+
+    def fail_after_partial_write(file_descriptor: int, payload: bytes) -> int:
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 1:
+            return real_write(file_descriptor, payload[:4])
+        raise OSError("synthetic write failure")
+
+    monkeypatch.setattr(proof, "_download_bytes", download)
+    monkeypatch.setattr(proof.os, "write", fail_after_partial_write)
+    destination = tmp_path / "artifacts"
+
+    with pytest.raises(OSError, match="synthetic write failure"):
+        proof.download_published_wheel("agentseek", "0.1.2", destination)
+
+    assert not (destination / "agentseek-0.1.2-py3-none-any.whl").exists()
+    assert list(destination.glob(".agentseek-0.1.2-py3-none-any.whl.*.tmp")) == []
+
+
 def test_collect_import_record_proves_real_environment_import() -> None:
     import pytest as pytest_package
 
@@ -399,30 +432,173 @@ def test_collect_import_record_proves_real_environment_import() -> None:
         record.version = "changed"  # type: ignore[misc]
 
 
+def test_collect_import_record_uses_minimal_environment_and_safe_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = tmp_path / "runtime"
+    python = environment / "bin" / "python"
+    module_path = environment / "site-packages" / "agentseek" / "__init__.py"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    module_path.parent.mkdir(parents=True)
+    module_path.touch()
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path / "checkout"))
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-provider-secret")
+    monkeypatch.setenv("PIP_INDEX_URL", "https://user:secret@example.test/simple")
+    monkeypatch.setattr(proof, "_is_windows", lambda: False)
+    captured: dict[str, object] = {}
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured["command"] = command
+        captured.update(kwargs)
+        payload = {
+            "distribution": "agentseek",
+            "module_path": str(module_path),
+            "python": str(python),
+            "version": "0.1.2",
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(proof.subprocess, "run", run)
+
+    record = proof.collect_import_record(python, "agentseek", "agentseek", environment)
+
+    assert record.version == "0.1.2"
+    assert captured["command"] == [str(python), "-c", proof.IMPORT_SCRIPT, "agentseek", "agentseek"]
+    assert captured["cwd"] == environment.resolve()
+    assert captured["timeout"] == 30.0
+    assert captured["env"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+        "PYTHONUTF8": "1",
+    }
+
+
+def test_collect_import_record_passes_only_windows_system_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    environment = tmp_path / "runtime"
+    python = environment / "Scripts" / "python.exe"
+    module_path = environment / "Lib" / "site-packages" / "agentseek" / "__init__.py"
+    python.parent.mkdir(parents=True)
+    python.touch()
+    module_path.parent.mkdir(parents=True)
+    module_path.touch()
+    monkeypatch.setattr(proof, "_is_windows", lambda: True)
+    for name in ("SYSTEMROOT", "SystemRoot", "WINDIR"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SystemRoot", r"C:\Windows")
+    monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-provider-secret")
+    captured: dict[str, object] = {}
+
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.update(kwargs)
+        payload = {
+            "distribution": "agentseek",
+            "module_path": str(module_path),
+            "python": str(python),
+            "version": "0.1.2",
+        }
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(proof.subprocess, "run", run)
+
+    proof.collect_import_record(python, "agentseek", "agentseek", environment)
+
+    assert captured["env"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONSAFEPATH": "1",
+        "PYTHONUTF8": "1",
+        "SystemRoot": r"C:\Windows",
+    }
+
+
 def test_collect_import_record_rejects_import_outside_environment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     environment = tmp_path / "runtime"
+    environment.mkdir()
+    python = environment / "bin" / "python"
     outside = tmp_path / "checkout" / "agentseek" / "__init__.py"
     payload = {
         "distribution": "agentseek",
         "module_path": str(outside),
-        "python": sys.executable,
+        "python": str(python),
         "version": "0.1.2",
     }
     completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
     monkeypatch.setattr(proof.subprocess, "run", lambda *_args, **_kwargs: completed)
 
-    with pytest.raises(RuntimeError, match="outside expected environment"):
-        proof.collect_import_record(Path(sys.executable), "agentseek", "agentseek", environment)
+    with pytest.raises(RuntimeError) as exc_info:
+        proof.collect_import_record(python, "agentseek", "agentseek", environment)
+
+    assert str(exc_info.value) == "import probe module is outside expected environment"
+    assert str(outside) not in str(exc_info.value)
+
+
+def test_collect_import_record_requires_the_requested_environment_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environment = tmp_path / "runtime"
+    requested_python = environment / "bin" / "python"
+    different_python = environment / "bin" / "python-other"
+    module_path = environment / "site-packages" / "agentseek" / "__init__.py"
+    requested_python.parent.mkdir(parents=True)
+    requested_python.touch()
+    module_path.parent.mkdir(parents=True)
+    module_path.touch()
+    payload = {
+        "distribution": "agentseek",
+        "module_path": str(module_path),
+        "python": str(different_python),
+        "version": "0.1.2",
+    }
+    completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload), stderr="")
+    monkeypatch.setattr(proof.subprocess, "run", lambda *_args, **_kwargs: completed)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        proof.collect_import_record(requested_python, "agentseek", "agentseek", environment)
+
+    assert str(exc_info.value) == "import probe returned an unexpected interpreter"
+    assert str(different_python) not in str(exc_info.value)
 
 
 def test_collect_import_record_reports_subprocess_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    completed = subprocess.CompletedProcess([], 1, stdout="", stderr="missing distribution")
+    environment = tmp_path / "runtime"
+    environment.mkdir()
+    python = environment / "bin" / "python"
+    completed = subprocess.CompletedProcess([], 1, stdout="", stderr="synthetic-provider-secret")
     monkeypatch.setattr(proof.subprocess, "run", lambda *_args, **_kwargs: completed)
 
-    with pytest.raises(RuntimeError, match="missing distribution"):
-        proof.collect_import_record(Path(sys.executable), "missing", "missing", tmp_path)
+    with pytest.raises(RuntimeError) as exc_info:
+        proof.collect_import_record(python, "missing", "missing", environment)
+
+    assert str(exc_info.value) == "import probe failed"
+    assert "synthetic-provider-secret" not in str(exc_info.value)
+
+
+def test_collect_import_record_reports_value_free_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    environment = tmp_path / "runtime"
+    environment.mkdir()
+    python = environment / "bin" / "python"
+
+    def time_out(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(
+            cmd=["synthetic-provider-secret"],
+            timeout=30.0,
+            output="synthetic-provider-secret",
+            stderr="synthetic-provider-secret",
+        )
+
+    monkeypatch.setattr(proof.subprocess, "run", time_out)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        proof.collect_import_record(python, "agentseek", "agentseek", environment)
+
+    assert str(exc_info.value) == "import probe timed out"
+    assert "synthetic-provider-secret" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
 
 
 def test_write_proof_rejects_output_inside_repository_before_creating_parent(tmp_path: Path) -> None:
@@ -444,6 +620,73 @@ def test_write_proof_serializes_stable_json_with_one_trailing_newline(tmp_path: 
     proof.write_proof(output, {"z": 2, "a": 1}, [repository])
 
     assert output.read_text(encoding="utf-8") == '{\n  "a": 1,\n  "z": 2\n}\n'
+
+
+def test_write_proof_preserves_previous_file_and_cleans_temporary_on_publish_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    output = tmp_path / "evidence" / "runtime-proof.json"
+    output.parent.mkdir()
+    previous = '{\n  "status": "previous"\n}\n'
+    output.write_text(previous, encoding="utf-8")
+
+    def fail_publish(_source: Path, _destination: Path) -> None:
+        raise OSError("synthetic publish failure")
+
+    monkeypatch.setattr(proof.os, "replace", fail_publish)
+
+    with pytest.raises(OSError, match="synthetic publish failure"):
+        proof.write_proof(output, {"status": "replacement"}, [repository])
+
+    assert output.read_text(encoding="utf-8") == previous
+    assert list(output.parent.glob(".runtime-proof.json.*.tmp")) == []
+
+
+def test_write_proof_keeps_previous_bytes_visible_until_atomic_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    output = tmp_path / "evidence" / "runtime-proof.json"
+    output.parent.mkdir()
+    previous = '{\n  "status": "previous"\n}\n'
+    replacement = '{\n  "status": "replacement"\n}\n'
+    output.write_text(previous, encoding="utf-8")
+    before_publish = threading.Event()
+    allow_publish = threading.Event()
+    writer_errors: list[BaseException] = []
+    real_replace = os.replace
+
+    def paused_replace(source: Path, destination: Path) -> None:
+        assert source.parent == output.parent
+        assert destination == output
+        before_publish.set()
+        if not allow_publish.wait(timeout=5):
+            raise RuntimeError("test did not release atomic publish")
+        real_replace(source, destination)
+
+    def write_replacement() -> None:
+        try:
+            proof.write_proof(output, {"status": "replacement"}, [repository])
+        except BaseException as exc:  # pragma: no cover - asserted by the parent thread
+            writer_errors.append(exc)
+
+    monkeypatch.setattr(proof.os, "replace", paused_replace)
+    writer = threading.Thread(target=write_replacement)
+    writer.start()
+    try:
+        assert before_publish.wait(timeout=5)
+        assert output.read_text(encoding="utf-8") == previous
+    finally:
+        allow_publish.set()
+        writer.join(timeout=5)
+
+    assert not writer.is_alive()
+    assert writer_errors == []
+    assert output.read_text(encoding="utf-8") == replacement
+    assert list(output.parent.glob(".runtime-proof.json.*.tmp")) == []
 
 
 def test_write_proof_resolves_external_output_without_creating_repository_intermediates(tmp_path: Path) -> None:

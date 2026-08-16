@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -60,6 +62,14 @@ CONTROL_PATH_NAMES = frozenset(
 DOWNLOAD_ATTEMPTS = 3
 DOWNLOAD_TIMEOUT_SECONDS = 30.0
 DOWNLOAD_RETRY_DELAY_SECONDS = 0.25
+IMPORT_PROBE_TIMEOUT_SECONDS = 30.0
+IMPORT_PROBE_ENVIRONMENT = {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
+    "PYTHONUTF8": "1",
+}
+WINDOWS_IMPORT_BOOTSTRAP_NAMES = ("SYSTEMROOT", "SystemRoot", "WINDIR")
 
 
 def _is_windows() -> bool:
@@ -178,6 +188,34 @@ def verify_sha256(payload: bytes, expected: str) -> str:
     return actual
 
 
+def _atomic_write_bytes(path: Path, payload: bytes) -> None:
+    file_descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        file_descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary_path = Path(temporary_name)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(file_descriptor, remaining)
+            if written <= 0:
+                raise OSError("atomic write made no progress")
+            remaining = remaining[written:]
+        os.fsync(file_descriptor)
+        os.close(file_descriptor)
+        file_descriptor = -1
+        os.replace(temporary_path, path)
+    finally:
+        if file_descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(file_descriptor)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def _download_bytes(url: str) -> bytes:
     if urllib.parse.urlparse(url).scheme.lower() != "https":
         raise RuntimeError(f"artifact download URL must use HTTPS: {url}")
@@ -229,7 +267,7 @@ def download_published_wheel(name: str, version: str, destination: Path) -> Whee
     digest = verify_sha256(payload, digests["sha256"])
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     artifact_path = destination / filename
-    artifact_path.write_bytes(payload)
+    _atomic_write_bytes(artifact_path, payload)
     return WheelArtifact(
         name=name,
         version=version,
@@ -257,43 +295,89 @@ print(json.dumps({
 """
 
 
+def _build_import_probe_environment(source: Mapping[str, str]) -> dict[str, str]:
+    environment = dict(IMPORT_PROBE_ENVIRONMENT)
+    if not _is_windows():
+        return environment
+
+    for name in WINDOWS_IMPORT_BOOTSTRAP_NAMES:
+        value = source.get(name)
+        if not value:
+            continue
+        if "\x00" in value or "\n" in value or "\r" in value:
+            raise RuntimeError("import probe Windows system root is invalid")
+        environment[name] = value
+        return environment
+    raise RuntimeError("import probe has no Windows system root")
+
+
+def _absolute_without_resolving_symlinks(path: Path) -> Path:
+    return Path(os.path.abspath(path))
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    return path == root or path.is_relative_to(root)
+
+
 def collect_import_record(
     python: Path,
     distribution: str,
     module: str,
     environment_root: Path,
 ) -> ImportRecord:
-    completed = subprocess.run(
-        [str(python), "-c", IMPORT_SCRIPT, distribution, module],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    resolved_environment = environment_root.resolve()
+    requested_python = _absolute_without_resolving_symlinks(python)
+    if not resolved_environment.is_dir() or not _is_within(requested_python, resolved_environment):
+        raise RuntimeError("import probe interpreter is outside expected environment")
+
+    try:
+        completed = subprocess.run(
+            [str(requested_python), "-c", IMPORT_SCRIPT, distribution, module],
+            check=False,
+            capture_output=True,
+            cwd=resolved_environment,
+            encoding="utf-8",
+            env=_build_import_probe_environment(os.environ),
+            errors="replace",
+            text=True,
+            timeout=IMPORT_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("import probe timed out") from None
+    except OSError:
+        raise RuntimeError("import probe execution failed") from None
     if completed.returncode != 0:
-        detail = completed.stderr.strip() or completed.stdout.strip() or f"exit code {completed.returncode}"
-        raise RuntimeError(f"failed to collect import record for {distribution}: {detail}")
+        raise RuntimeError("import probe failed")
     try:
         payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"interpreter returned invalid import record for {distribution}") from exc
+    except json.JSONDecodeError:
+        raise RuntimeError("import probe returned invalid JSON") from None
     if not isinstance(payload, dict):
-        raise RuntimeError(f"interpreter returned invalid import record for {distribution}")
+        raise RuntimeError("import probe returned invalid record")
 
     returned_distribution = payload.get("distribution")
     version = payload.get("version")
     module_path = payload.get("module_path")
     returned_python = payload.get("python")
     if returned_distribution != distribution:
-        raise RuntimeError(f"interpreter returned the wrong distribution: {returned_distribution!r}")
+        raise RuntimeError("import probe returned the wrong distribution")
     if not all(isinstance(value, str) and value for value in (version, module_path, returned_python)):
-        raise RuntimeError(f"interpreter returned incomplete import record for {distribution}")
+        raise RuntimeError("import probe returned an incomplete record")
 
-    resolved_module = validate_import_path(Path(module_path), environment_root)
+    returned_python_path = _absolute_without_resolving_symlinks(Path(returned_python))
+    if not _is_within(returned_python_path, resolved_environment) or os.path.normcase(
+        str(returned_python_path)
+    ) != os.path.normcase(str(requested_python)):
+        raise RuntimeError("import probe returned an unexpected interpreter")
+    try:
+        resolved_module = validate_import_path(Path(module_path), resolved_environment)
+    except (OSError, RuntimeError):
+        raise RuntimeError("import probe module is outside expected environment") from None
     return ImportRecord(
         distribution=distribution,
         version=version,
         module_path=str(resolved_module),
-        python=returned_python,
+        python=str(returned_python_path),
     )
 
 
@@ -304,5 +388,5 @@ def write_proof(path: Path, payload: Mapping[str, object], forbidden_roots: Sequ
         raise RuntimeError(f"proof output must be outside participating repositories: {resolved_path}")
 
     resolved_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    serialized = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    resolved_path.write_text(serialized, encoding="utf-8")
+    serialized = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    _atomic_write_bytes(resolved_path, serialized)
