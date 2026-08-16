@@ -14,6 +14,8 @@ from agentseek.cli.lifecycle import normalize_lifecycle
 from agentseek.cli.lifecycle.authored import LifecycleSpecV2
 from agentseek.cli.lifecycle.spec import read_lifecycle_spec
 from cookiecutter.main import cookiecutter
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_ROOT = REPOSITORY_ROOT / "templates"
@@ -22,6 +24,7 @@ CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
 CORE_COMMIT = "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc"
 AGENTSEEK_API_VERSION = "0.2.2"
 AGENTSEEK_API_DEPENDENCY = f"agentseek-api[embedded]=={AGENTSEEK_API_VERSION}"
+AGENTSEEK_API_CANONICAL_NAME = canonicalize_name("agentseek-api")
 MIGRATED_RUNTIME_TEMPLATES = {
     "deepagents/content-builder",
     "deepagents/mcp",
@@ -384,6 +387,18 @@ EXPECTED_NORMALIZED_TOPOLOGY = {
 }
 
 
+def _assert_exact_agentseek_api_dependency(requirements: list[str]) -> None:
+    api_dependencies: list[tuple[str, str]] = []
+    for raw_requirement in requirements:
+        parsed = Requirement(raw_requirement)
+        if canonicalize_name(parsed.name) == AGENTSEEK_API_CANONICAL_NAME:
+            api_dependencies.append((raw_requirement, str(parsed)))
+    expected = [(AGENTSEEK_API_DEPENDENCY, AGENTSEEK_API_DEPENDENCY)]
+    assert api_dependencies == expected, (
+        f"agentseek-api dependencies must be exactly {expected}, got {api_dependencies}"
+    )
+
+
 def _registered_templates() -> list[tuple[str, Path]]:
     return [(key, TEMPLATES_ROOT / key) for key in sorted(INDEX)]
 
@@ -473,14 +488,84 @@ def test_migrated_templates_pin_the_published_api_release(
     output_root.mkdir()
     generated_path = _render(TEMPLATES_ROOT / template_key, output_root, tmp_path)
     project = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
-    api_dependencies = [item for item in project["project"].get("dependencies", []) if item.startswith("agentseek-api")]
-    assert api_dependencies == [AGENTSEEK_API_DEPENDENCY]
+    _assert_exact_agentseek_api_dependency(project["project"].get("dependencies", []))
 
     requirements = generated_path / "requirements.txt"
-    if requirements.is_file() and template_key == "langchain/cli-remote":
-        lines = {line.strip() for line in requirements.read_text(encoding="utf-8").splitlines() if line.strip()}
-        api_lines = {line for line in lines if line.startswith("agentseek-api")}
-        assert api_lines == {AGENTSEEK_API_DEPENDENCY}
+    if template_key == "langchain/cli-remote":
+        assert requirements.is_file(), "agentseek-api requirements.txt is missing for langchain/cli-remote"
+        lines = [line.strip() for line in requirements.read_text(encoding="utf-8").splitlines() if line.strip()]
+        _assert_exact_agentseek_api_dependency(lines)
+
+
+def _write_exact_pin_contract_fixture(
+    root: Path,
+    dependencies: list[str],
+    requirements: str | None,
+) -> Path:
+    generated = root / "generated"
+    generated.mkdir()
+    dependency_lines = "\n".join(f"    {json.dumps(item)}," for item in dependencies)
+    (generated / "pyproject.toml").write_text(
+        f"[project]\ndependencies = [\n{dependency_lines}\n]\n",
+        encoding="utf-8",
+    )
+    if requirements is not None:
+        (generated / "requirements.txt").write_text(requirements, encoding="utf-8")
+    return generated
+
+
+@pytest.mark.parametrize(
+    "requirements",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param(
+            "agentseek-api[embedded]==0.2.2\nagentseek-api[embedded]==0.2.2\n",
+            id="duplicate",
+        ),
+        pytest.param(
+            "agentseek-api[embedded]==0.2.2\nAgentSeek_API[embedded]>=0.2\n",
+            id="pep503-equivalent-conflict",
+        ),
+    ],
+)
+def test_exact_api_pin_contract_rejects_invalid_cli_requirements(
+    requirements: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated = _write_exact_pin_contract_fixture(
+        tmp_path,
+        ["agentseek-api[embedded]==0.2.2"],
+        requirements,
+    )
+    monkeypatch.setitem(sys.modules[__name__].__dict__, "_render", lambda *_args, **_kwargs: generated)
+
+    with pytest.raises(AssertionError, match="agentseek-api"):
+        test_migrated_templates_pin_the_published_api_release("langchain/cli-remote", tmp_path)
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        ["agentseek-api[embedded]==0.2.2", "agentseek-api[embedded]==0.2.2"],
+        ["agentseek-api[embedded]==0.2.2", "AgentSeek_API[embedded]>=0.2"],
+    ],
+    ids=["duplicate", "pep503-equivalent-conflict"],
+)
+def test_exact_api_pin_contract_rejects_invalid_pyproject_dependencies(
+    dependencies: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated = _write_exact_pin_contract_fixture(
+        tmp_path,
+        dependencies,
+        "agentseek-api[embedded]==0.2.2\n",
+    )
+    monkeypatch.setitem(sys.modules[__name__].__dict__, "_render", lambda *_args, **_kwargs: generated)
+
+    with pytest.raises(AssertionError, match="agentseek-api"):
+        test_migrated_templates_pin_the_published_api_release("langchain/cli-remote", tmp_path)
 
 
 @pytest.mark.parametrize("template_key", sorted(MIGRATED_RUNTIME_TEMPLATES))
