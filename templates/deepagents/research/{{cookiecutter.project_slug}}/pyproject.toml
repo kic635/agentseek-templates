@@ -14,7 +14,7 @@ dependencies = [
     "httpx[socks]>=0.28",
     "markdownify>=0.13",
     "python-dotenv>=1.0",
-    "agentseek-api[embedded]==0.2.2",
+    "agentseek-api[embedded]==0.2.3",
     "mcp>=1.27.1,<2",
 ]
 

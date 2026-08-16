@@ -70,7 +70,7 @@ def make_graph() -> CompiledStateGraph:
         return _runtime.graph
     with _runtime_lock:
         if _runtime is None:
-            # AgentSeek API 0.2.2 invokes graph factories synchronously from an
+            # AgentSeek API 0.2.3 invokes graph factories synchronously from an
             # async request. Use a worker so MCP discovery can own its event loop.
             with ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcp-graph-build") as executor:
                 _runtime = executor.submit(_build_runtime_in_worker).result()

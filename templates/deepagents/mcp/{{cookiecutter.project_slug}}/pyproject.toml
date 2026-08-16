@@ -13,7 +13,7 @@ dependencies = [
     "langchain-openai>=0.3",
     "python-dotenv>=1.0",
     "starlette>=0.27",
-    "agentseek-api[embedded]==0.2.2",
+    "agentseek-api[embedded]==0.2.3",
     "pyobvector[pyseekdb]",
     "mcp>=1.27.1,<2",
 ]

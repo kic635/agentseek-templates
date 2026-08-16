@@ -751,16 +751,16 @@ def test_generated_frontend_install_runs_from_detected_frontend_directory(
     frontend = generated / "frontend"
     frontend.mkdir(parents=True)
     (frontend / "package.json").write_text("{}\n", encoding="utf-8")
-    artifact_path = run_root / "artifacts" / "agentseek_api-0.2.2-py3-none-any.whl"
+    artifact_path = run_root / "artifacts" / "agentseek_api-0.2.3-py3-none-any.whl"
     artifact_path.parent.mkdir()
     artifact_path.write_bytes(b"wheel")
     artifact = smoke.WheelArtifact(
         name="agentseek-api",
-        version="0.2.2",
+        version="0.2.3",
         filename=artifact_path.name,
         path=artifact_path,
         sha256="a" * 64,
-        url="https://files.pythonhosted.org/agentseek_api-0.2.2-py3-none-any.whl",
+        url="https://files.pythonhosted.org/agentseek_api-0.2.3-py3-none-any.whl",
     )
     npm = Path(r"C:\hostedtoolcache\node\npm.CMD")
     toolchain = smoke.Toolchain(
@@ -814,16 +814,16 @@ def test_generated_sync_uses_the_exact_outer_python(
     run_root = tmp_path / "run"
     generated = run_root / "rendered" / "project"
     generated.mkdir(parents=True)
-    artifact_path = run_root / "artifacts" / "agentseek_api-0.2.2-py3-none-any.whl"
+    artifact_path = run_root / "artifacts" / "agentseek_api-0.2.3-py3-none-any.whl"
     artifact_path.parent.mkdir()
     artifact_path.write_bytes(b"wheel")
     artifact = smoke.WheelArtifact(
         name="agentseek-api",
-        version="0.2.2",
+        version="0.2.3",
         filename=artifact_path.name,
         path=artifact_path,
         sha256="a" * 64,
-        url="https://files.pythonhosted.org/agentseek_api-0.2.2-py3-none-any.whl",
+        url="https://files.pythonhosted.org/agentseek_api-0.2.3-py3-none-any.whl",
     )
     toolchain = smoke.Toolchain(
         uv=Path("/toolchain/uv"),
@@ -1078,7 +1078,7 @@ def test_runtime_workflow_covers_every_retained_migration() -> None:
         ' --template "${{ matrix.template }}"'
         " --catalog-mode source"
         " --agentseek-version 0.1.2"
-        " --agentseek-api-version 0.2.2"
+        " --agentseek-api-version 0.2.3"
         ' --database-mode "${{ matrix.database }}"'
         ' --output-root "${{ runner.temp }}/r/${{ matrix.id }}"'
         ' --proof-output "${{ runner.temp }}/runtime-proof/${{ matrix.id }}.json"'
@@ -1224,16 +1224,16 @@ def test_catalog_proof_records_observed_lock_without_render_claim(
 def test_generated_lock_validates_uv_flat_index_wheel(tmp_path: Path) -> None:
     artifact_dir = tmp_path / "artifacts"
     artifact_dir.mkdir()
-    wheel = artifact_dir / "agentseek_api-0.2.2-py3-none-any.whl"
+    wheel = artifact_dir / "agentseek_api-0.2.3-py3-none-any.whl"
     wheel.write_bytes(b"verified wheel bytes")
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     artifact = smoke.WheelArtifact(
         name="agentseek-api",
-        version="0.2.2",
+        version="0.2.3",
         filename=wheel.name,
         path=wheel,
         sha256=digest,
-        url="https://files.pythonhosted.org/agentseek_api-0.2.2-py3-none-any.whl",
+        url="https://files.pythonhosted.org/agentseek_api-0.2.3-py3-none-any.whl",
     )
     generated = tmp_path / "rendered" / "project"
     generated.mkdir(parents=True)
@@ -1242,17 +1242,17 @@ def test_generated_lock_validates_uv_flat_index_wheel(tmp_path: Path) -> None:
 
 [[package]]
 name = "agentseek-api"
-version = "0.2.2"
+version = "0.2.3"
 source = { registry = "../../artifacts" }
 wheels = [
-    { path = "agentseek_api-0.2.2-py3-none-any.whl" },
+    { path = "agentseek_api-0.2.3-py3-none-any.whl" },
 ]
 """,
         encoding="utf-8",
     )
 
     assert smoke._validate_api_lock(generated, artifact) == {
-        "version": "0.2.2",
+        "version": "0.2.3",
         "wheel_filename": wheel.name,
         "wheel_sha256": digest,
     }
@@ -1262,3 +1262,33 @@ def test_release_harness_requires_python_312() -> None:
     smoke.require_release_python(3, 12)
     with pytest.raises(RuntimeError, match="Python 3.12"):
         smoke.require_release_python(3, 13)
+
+
+def test_release_harness_rejects_previous_api_release_before_download(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(smoke, "require_release_python", lambda *_args: None)
+    monkeypatch.setattr(
+        smoke.runtime_proof,
+        "download_published_wheel",
+        lambda *_args, **_kwargs: pytest.fail("artifact download must not start"),
+    )
+
+    with pytest.raises(RuntimeError, match=r"agentseek-api==0\.2\.3"):
+        smoke.main(
+            [
+                "--template",
+                "langchain/markdown-messages",
+                "--catalog-mode",
+                "source",
+                "--agentseek-version",
+                "0.1.2",
+                "--agentseek-api-version",
+                "0.2.2",
+                "--output-root",
+                str(tmp_path / "runtime"),
+                "--proof-output",
+                str(tmp_path / "proof.json"),
+            ]
+        )

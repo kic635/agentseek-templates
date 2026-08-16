@@ -1564,8 +1564,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     run_root = Path(tempfile.mkdtemp(prefix="template-runtime-", dir=output_root)).resolve()
     profile = PROFILES[args.template]
     source_template_root = ROOT / "templates" / args.template
-    if args.agentseek_api_version != "0.2.2":
-        raise RuntimeError("this release proof requires agentseek-api==0.2.2")
+    if args.agentseek_api_version != "0.2.3":
+        raise RuntimeError("this release proof requires agentseek-api==0.2.3")
     if args.agentseek_wheel is not None and args.agentseek_version != "0.1.3":
         raise RuntimeError("--agentseek-wheel is reserved for the AgentSeek 0.1.3 candidate proof")
 

@@ -25,7 +25,7 @@ TEMPLATES_ROOT = REPOSITORY_ROOT / "templates"
 INDEX = json.loads((TEMPLATES_ROOT / "index.json").read_text(encoding="utf-8"))
 CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
 CORE_COMMIT = "900f89518c32f8570d7648897394ed96a86a647a"
-AGENTSEEK_API_VERSION = "0.2.2"
+AGENTSEEK_API_VERSION = "0.2.3"
 AGENTSEEK_API_DEPENDENCY = f"agentseek-api[embedded]=={AGENTSEEK_API_VERSION}"
 AGENTSEEK_API_CANONICAL_NAME = canonicalize_name("agentseek-api")
 MIGRATED_RUNTIME_TEMPLATES = {
@@ -526,11 +526,11 @@ def _write_exact_pin_contract_fixture(
     [
         pytest.param(None, id="missing"),
         pytest.param(
-            "agentseek-api[embedded]==0.2.2\nagentseek-api[embedded]==0.2.2\n",
+            "agentseek-api[embedded]==0.2.3\nagentseek-api[embedded]==0.2.3\n",
             id="duplicate",
         ),
         pytest.param(
-            "agentseek-api[embedded]==0.2.2\nAgentSeek_API[embedded]>=0.2\n",
+            "agentseek-api[embedded]==0.2.3\nAgentSeek_API[embedded]>=0.2\n",
             id="pep503-equivalent-conflict",
         ),
     ],
@@ -541,7 +541,7 @@ def test_exact_api_pin_contract_rejects_invalid_cli_requirements(
 ) -> None:
     generated = _write_exact_pin_contract_fixture(
         tmp_path,
-        ["agentseek-api[embedded]==0.2.2"],
+        ["agentseek-api[embedded]==0.2.3"],
         requirements,
     )
 
@@ -553,8 +553,8 @@ def test_exact_api_pin_contract_rejects_invalid_cli_requirements(
     "dependencies",
     [
         [],
-        ["agentseek-api[embedded]==0.2.2", "agentseek-api[embedded]==0.2.2"],
-        ["agentseek-api[embedded]==0.2.2", "AgentSeek_API[embedded]>=0.2"],
+        ["agentseek-api[embedded]==0.2.3", "agentseek-api[embedded]==0.2.3"],
+        ["agentseek-api[embedded]==0.2.3", "AgentSeek_API[embedded]>=0.2"],
     ],
     ids=["missing", "duplicate", "pep503-equivalent-conflict"],
 )
@@ -565,7 +565,7 @@ def test_exact_api_pin_contract_rejects_invalid_pyproject_dependencies(
     generated = _write_exact_pin_contract_fixture(
         tmp_path,
         dependencies,
-        "agentseek-api[embedded]==0.2.2\n",
+        "agentseek-api[embedded]==0.2.3\n",
     )
 
     with pytest.raises(AssertionError, match="agentseek-api"):
