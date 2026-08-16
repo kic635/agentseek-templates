@@ -13,12 +13,27 @@ import zipfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "generated_runtime_smoke.py"
 SPEC = importlib.util.spec_from_file_location("generated_runtime_smoke", SCRIPT)
 assert SPEC and SPEC.loader
 smoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(smoke)
+
+
+def _assert_no_workflow_secrets(value: object) -> None:
+    if isinstance(value, str):
+        assert "secrets." not in value
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _assert_no_workflow_secrets(key)
+            _assert_no_workflow_secrets(item)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _assert_no_workflow_secrets(item)
 
 
 class _Process:
@@ -629,23 +644,119 @@ def test_profiles_cover_exact_retained_runtime_matrix() -> None:
 
 
 def test_runtime_workflow_covers_every_retained_migration() -> None:
-    workflow = (smoke.ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
-    marker = "\n  migrated-local-runtime-matrix:\n"
-    assert marker in workflow
-    matrix = workflow.split(marker, maxsplit=1)[1]
-    for template in sorted(smoke.PROFILES):
-        assert f"template: {template}" in matrix
-    assert matrix.count("template: deepagents/mcp") == 2
-    assert "os: windows-latest" in matrix
-    assert "database: sqlite" in matrix
-    assert matrix.count("database: embedded") == len(smoke.PROFILES)
-    assert 'python-version: "3.12"' in matrix
-    assert 'node-version: "22"' in matrix
-    assert 'version: "0.9.28"' in matrix
-    assert "--agentseek-version 0.1.2" in matrix
-    assert "--agentseek-api-version 0.2.2" in matrix
-    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in matrix
-    assert "secrets." not in matrix
+    workflow = yaml.safe_load((smoke.ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["migrated-local-runtime-matrix"]
+    expected_matrix = [
+        {
+            "template": "deepagents/content-builder",
+            "os": "ubuntu-latest",
+            "id": "content-builder-linux",
+            "database": "embedded",
+        },
+        {
+            "template": "deepagents/mcp",
+            "os": "ubuntu-latest",
+            "id": "mcp-linux",
+            "database": "embedded",
+        },
+        {
+            "template": "deepagents/mcp",
+            "os": "windows-latest",
+            "id": "mcp-windows",
+            "database": "sqlite",
+        },
+        {
+            "template": "deepagents/research",
+            "os": "ubuntu-latest",
+            "id": "research-linux",
+            "database": "embedded",
+        },
+        {
+            "template": "langchain/agentic-rag",
+            "os": "ubuntu-latest",
+            "id": "agentic-rag-linux",
+            "database": "embedded",
+        },
+        {
+            "template": "langchain/agentic-rag-hybrid",
+            "os": "ubuntu-latest",
+            "id": "agentic-rag-hybrid-linux",
+            "database": "embedded",
+        },
+        {
+            "template": "langchain/cli-remote",
+            "os": "ubuntu-latest",
+            "id": "cli-remote-linux",
+            "database": "embedded",
+        },
+        {
+            "template": "langchain/markdown-messages",
+            "os": "ubuntu-latest",
+            "id": "markdown-messages-linux",
+            "database": "embedded",
+        },
+        {
+            "template": "langchain/rubric",
+            "os": "ubuntu-latest",
+            "id": "rubric-linux",
+            "database": "embedded",
+        },
+    ]
+    expected_harness_command = (
+        "uv run python scripts/generated_runtime_smoke.py"
+        ' --template "${{ matrix.template }}"'
+        " --catalog-mode source"
+        " --agentseek-version 0.1.2"
+        " --agentseek-api-version 0.2.2"
+        ' --database-mode "${{ matrix.database }}"'
+        ' --output-root "${{ env.GENERATED_RUNTIME_ROOT }}/${{ matrix.id }}"'
+        ' --proof-output "${{ runner.temp }}/runtime-proof/${{ matrix.id }}.json"'
+    )
+    expected_upload = {
+        "name": "Upload published-runtime proof",
+        "uses": "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "with": {
+            "name": "runtime-proof-${{ matrix.id }}",
+            "path": "${{ runner.temp }}/runtime-proof/${{ matrix.id }}.json",
+            "if-no-files-found": "error",
+        },
+    }
+
+    assert set(job) == {"name", "runs-on", "timeout-minutes", "strategy", "steps"}
+    assert job["name"] == "${{ matrix.template }} (${{ matrix.os }})"
+    assert job["runs-on"] == "${{ matrix.os }}"
+    assert job["timeout-minutes"] == 30
+    assert job["strategy"] == {
+        "fail-fast": False,
+        "matrix": {"include": expected_matrix},
+    }
+    assert job["steps"] == [
+        {
+            "uses": "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+            "with": {"persist-credentials": False},
+        },
+        {
+            "uses": "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+            "with": {"python-version": "3.12"},
+        },
+        {
+            "uses": "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+            "with": {"node-version": "22"},
+        },
+        {
+            "uses": "astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e",
+            "with": {"version": "0.9.28", "enable-cache": True},
+        },
+        {"run": "uv sync --frozen --dev"},
+        {
+            "name": "Render, install, and exercise the generated lifecycle",
+            "env": {"GENERATED_RUNTIME_ROOT": "${{ runner.temp }}/generated-runtime"},
+            "run": expected_harness_command,
+        },
+        expected_upload,
+    ]
+    assert "if" not in job["steps"][-1]
+    _assert_no_workflow_secrets(job)
 
 
 def test_candidate_wheel_requires_matching_distribution_metadata(tmp_path: Path) -> None:
