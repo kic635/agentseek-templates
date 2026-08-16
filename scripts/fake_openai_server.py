@@ -62,8 +62,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--host", choices=("127.0.0.1",), required=True)
-    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--host", choices=("127.0.0.1",), default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=2025)
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")

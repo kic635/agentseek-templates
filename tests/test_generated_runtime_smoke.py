@@ -21,6 +21,28 @@ assert SPEC and SPEC.loader
 smoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(smoke)
 
+FAKE_PROVIDER_SCRIPT = SCRIPT.with_name("fake_openai_server.py")
+FAKE_PROVIDER_SPEC = importlib.util.spec_from_file_location("fake_openai_server", FAKE_PROVIDER_SCRIPT)
+assert FAKE_PROVIDER_SPEC and FAKE_PROVIDER_SPEC.loader
+fake_provider = importlib.util.module_from_spec(FAKE_PROVIDER_SPEC)
+FAKE_PROVIDER_SPEC.loader.exec_module(fake_provider)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], ("127.0.0.1", 2025)),
+        (["--host", "127.0.0.1", "--port", "43125"], ("127.0.0.1", 43125)),
+    ],
+)
+def test_fake_provider_address_defaults_and_explicit_override(
+    argv: list[str],
+    expected: tuple[str, int],
+) -> None:
+    args = fake_provider._parse_args(argv)
+
+    assert (args.host, args.port) == expected
+
 
 def _assert_no_workflow_secrets(value: object) -> None:
     if isinstance(value, str):
