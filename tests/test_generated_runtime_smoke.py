@@ -337,6 +337,26 @@ def test_profiles_cover_exact_retained_runtime_matrix() -> None:
     }
 
 
+def test_runtime_workflow_covers_every_retained_migration() -> None:
+    workflow = (smoke.ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8")
+    marker = "\n  migrated-local-runtime-matrix:\n"
+    assert marker in workflow
+    matrix = workflow.split(marker, maxsplit=1)[1]
+    for template in sorted(smoke.PROFILES):
+        assert f"template: {template}" in matrix
+    assert matrix.count("template: deepagents/mcp") == 2
+    assert "os: windows-latest" in matrix
+    assert "database: sqlite" in matrix
+    assert matrix.count("database: embedded") == len(smoke.PROFILES)
+    assert 'python-version: "3.12"' in matrix
+    assert 'node-version: "22"' in matrix
+    assert 'version: "0.9.28"' in matrix
+    assert "--agentseek-version 0.1.2" in matrix
+    assert "--agentseek-api-version 0.2.2" in matrix
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in matrix
+    assert "secrets." not in matrix
+
+
 def test_candidate_wheel_requires_matching_distribution_metadata(tmp_path: Path) -> None:
     wheel = tmp_path / "agentseek-0.1.3-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
