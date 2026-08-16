@@ -18,7 +18,7 @@ Scaffolded with `agentseek create langchain/agentic-rag-openvino`.
 │              → deterministic retrieve-then-generate graph │
 │  Embedding:  HuggingFaceEmbeddings(backend="openvino")   │
 │  Vector DB:  OceanBase seekdb                            │
-│  Serving:    agentseek-api dev → React frontend          │
+│  Serving:    langgraph dev → React frontend              │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -53,9 +53,9 @@ template tasks.
 
 ## Setup
 
-> **Python 3.12+ required.** This matches the supported Python floor of
-> `agentseek-api`; use Python 3.12 when the local OpenVINO stack does not yet
-> support a newer interpreter.
+> **Python 3.10+ required** (not 3.12+). OpenVINO runtime and
+> `optimum[openvino]` have limited Python 3.13+ support, so this template
+> uses `requires-python = ">=3.10"`.
 >
 > **Node.js 20+ recommended** for the Vite frontend dependencies.
 
@@ -140,7 +140,7 @@ agentseek dev --dry-run
 agentseek dev
 ```
 
-`agentseek dev` starts OceanBase seekdb, `agentseek-api dev`, and the Vite frontend from the
+`agentseek dev` starts OceanBase seekdb, `langgraph dev`, and the Vite frontend from the
 lifecycle spec. In another terminal, use `agentseek doctor --live` to check the
 declared HTTP endpoints.
 

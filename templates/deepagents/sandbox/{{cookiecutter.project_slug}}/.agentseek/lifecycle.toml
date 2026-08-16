@@ -5,21 +5,6 @@ description = "DeepAgents coding application with an isolated Daytona or LangSmi
 env_file = ".env"
 guide = "README.md"
 
-[env.SEEKDB_EMBED]
-required = true
-default = "true"
-description = "Use embedded AgentSeek API checkpoint persistence."
-
-[env.SEEKDB_EMBED_DIR]
-required = true
-default = "~/.agentseek/{{ cookiecutter.project_slug }}/seekdb"
-description = "Embedded AgentSeek API persistence directory."
-
-[env.OCEANBASE_DB_NAME]
-required = true
-default = "test"
-description = "Embedded AgentSeek API database name."
-
 [tools]
 required = ["uv", "node", "npm"]
 
@@ -51,13 +36,13 @@ required = false
 description = "Required for the charged LangSmith Sandbox alternative or optional tracing."
 
 [services.backend]
-name = "AgentSeek API"
+name = "LangGraph API"
 url = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
-tech = "agentseek-api"
 kind = "api"
 display = "advanced"
 primary = false
-description = "AgentSeek API runtime that runs the sandbox-backed coding agent."
+description = "LangGraph development API that runs the sandbox-backed coding agent."
+tech = "langgraph"
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
 
 [services.frontend]
@@ -71,7 +56,7 @@ tech = "vite"
 links = { docs = "https://vite.dev/guide/" }
 
 [processes.backend]
-command = ["uv", "run", "agentseek-api", "dev", "--port", "{{ cookiecutter.langgraph_port }}"]
+command = ["uv", "run", "langgraph", "dev", "--no-browser", "--port", "{{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -79,15 +64,13 @@ cwd = "frontend"
 
 [checks.backend]
 type = "http"
-target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/health"
-service = "backend"
+target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
 timeout = 2
 attempts = 3
 
 [checks.frontend]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.frontend_port }}"
-service = "frontend"
 timeout = 2
 attempts = 3
 

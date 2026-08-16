@@ -1,4 +1,4 @@
-"""DeepAgents sandbox coding agent, served by `agentseek-api dev`.
+"""DeepAgents sandbox coding agent, served by `langgraph dev`.
 
 Uses Daytona by default and supports LangSmith Sandbox as an alternative so
 the agent can execute shell commands and interact with an isolated filesystem.

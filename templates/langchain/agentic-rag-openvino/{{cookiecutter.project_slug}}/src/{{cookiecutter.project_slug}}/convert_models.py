@@ -50,7 +50,7 @@ def convert_model(name: str, cfg: dict) -> None:
 def main() -> None:
     for name, cfg in MODELS.items():
         convert_model(name, cfg)
-    print("\nAll models converted. You can now run `uv run ingest` and `agentseek dev`.")
+    print("\nAll models converted. You can now run `uv run ingest` and `uv run langgraph dev`.")
 
 
 if __name__ == "__main__":

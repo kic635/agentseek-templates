@@ -24,22 +24,19 @@ MIGRATED_RUNTIME_TEMPLATES = {
     "deepagents/content-builder",
     "deepagents/mcp",
     "deepagents/research",
-    "deepagents/sandbox",
     "langchain/agentic-rag",
     "langchain/agentic-rag-hybrid",
-    "langchain/agentic-rag-openvino",
     "langchain/cli-remote",
     "langchain/markdown-messages",
     "langchain/rubric",
 }
-# Reviewer #14's local-runtime proof explicitly covers these seven templates.
+# Reviewer #14's local-runtime proof explicitly covers these six templates.
 # The two RAG variants below remain separately covered by catalog/lifecycle
 # tests until their full runtime smoke is intentionally enabled in CI.
 REVIEWER_LOCAL_RUNTIME_TEMPLATES = {
     "deepagents/content-builder",
     "deepagents/mcp",
     "deepagents/research",
-    "deepagents/sandbox",
     "langchain/agentic-rag-hybrid",
     "langchain/cli-remote",
     "langchain/rubric",
@@ -713,12 +710,43 @@ def test_markdown_messages_declares_embedded_seekdb_for_agentseek_api(tmp_path: 
     assert "agentseek-api[embedded]" in pyproject["project"]["dependencies"]
 
 
-def test_openvino_requires_agentseek_api_supported_python(tmp_path: Path) -> None:
+def test_openvino_remains_on_its_reviewed_runtime_until_a_model_fixture_exists(tmp_path: Path) -> None:
+    assert "langchain/agentic-rag-openvino" not in MIGRATED_RUNTIME_TEMPLATES
     output_root = tmp_path / "output"
     output_root.mkdir()
     generated_path = _render(TEMPLATES_ROOT / "langchain/agentic-rag-openvino", output_root, tmp_path)
     project = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
-    assert project["project"]["requires-python"] == ">=3.12"
+    lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
+    dependencies = set(project["project"]["dependencies"])
+    backend = " ".join(lifecycle["processes"]["backend"]["command"])
+
+    assert project["project"]["requires-python"] == ">=3.10"
+    assert "langgraph-cli[inmem]>=0.4" in dependencies
+    assert not any(item.startswith("agentseek-api") for item in dependencies)
+    assert "uv run langgraph dev" in backend
+
+
+def test_sandbox_remains_on_its_reviewed_runtime_until_a_local_provider_exists(tmp_path: Path) -> None:
+    assert "deepagents/sandbox" not in MIGRATED_RUNTIME_TEMPLATES
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "deepagents/sandbox", output_root, tmp_path)
+    project = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    lifecycle = tomllib.loads((generated_path / ".agentseek" / "lifecycle.toml").read_text(encoding="utf-8"))
+    dependencies = set(project["project"]["dependencies"])
+    backend = lifecycle["processes"]["backend"]["command"]
+
+    assert not any(item.startswith("agentseek-api") for item in dependencies)
+    assert "langgraph-cli[inmem]>=0.4" in dependencies
+    assert backend == [
+        "uv",
+        "run",
+        "langgraph",
+        "dev",
+        "--no-browser",
+        "--port",
+        "2024",
+    ]
 
 
 @pytest.mark.parametrize(("template_key", "template_root"), _registered_templates(), ids=sorted(INDEX))

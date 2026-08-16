@@ -1,4 +1,4 @@
-"""Local OpenVINO RAG graph, served by `agentseek-api dev`."""
+"""Local OpenVINO RAG graph, served by `langgraph dev`."""
 
 from __future__ import annotations
 
