@@ -501,6 +501,33 @@ def _bounded_output_tail(path: Path) -> str:
         return stream.read(COMMAND_OUTPUT_TAIL_BYTES).decode("utf-8", errors="replace")
 
 
+def _redact_diagnostic(
+    value: str,
+    command: Sequence[str],
+    environment: Mapping[str, str],
+) -> str:
+    sensitive_names = re.compile(r"(?:AUTH|CREDENTIAL|KEY|PASSWORD|SECRET|SENTINEL|TOKEN)", re.IGNORECASE)
+    redactions = {str(item) for item in command if item}
+    for name, item in environment.items():
+        if not item:
+            continue
+        if len(item) >= 4 or sensitive_names.search(name):
+            redactions.add(item)
+        if "PROXY" not in name.upper():
+            continue
+        try:
+            parsed = urllib.parse.urlsplit(item)
+        except ValueError:
+            continue
+        for credential in (parsed.username, parsed.password):
+            if credential:
+                redactions.add(credential)
+                redactions.add(urllib.parse.unquote(credential))
+    for redaction in sorted(redactions, key=len, reverse=True):
+        value = value.replace(redaction, "<redacted>")
+    return value
+
+
 def _value_free_tail(
     stdout_path: Path,
     stderr_path: Path,
@@ -510,28 +537,7 @@ def _value_free_tail(
     stdout_tail = _bounded_output_tail(stdout_path)
     stderr_tail = _bounded_output_tail(stderr_path)
     tail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
-    command_values = {str(value) for value in command if value}
-    environment_values = {value for value in environment.values() if value}
-    long_values = {value for value in (*environment_values, *command_values) if len(value) >= 4}
-    sensitive_names = re.compile(r"(?:AUTH|CREDENTIAL|KEY|PASSWORD|SECRET|SENTINEL|TOKEN)", re.IGNORECASE)
-    short_values = {str(value) for value in command if 0 < len(str(value)) < 4}
-    for name, value in environment.items():
-        if not value or len(value) >= 4:
-            continue
-        has_proxy_userinfo = False
-        if "PROXY" in name.upper():
-            try:
-                parsed = urllib.parse.urlsplit(value)
-                has_proxy_userinfo = parsed.username is not None or parsed.password is not None
-            except ValueError:
-                pass
-        if sensitive_names.search(name) or has_proxy_userinfo:
-            short_values.add(value)
-    for value in sorted(long_values, key=len, reverse=True):
-        tail = tail.replace(value, "<redacted>")
-    for value in sorted(short_values, key=len, reverse=True):
-        tail = tail.replace(value, "<redacted>")
-    return tail[-COMMAND_OUTPUT_TAIL_BYTES:]
+    return _redact_diagnostic(tail, command, environment)[-COMMAND_OUTPUT_TAIL_BYTES:]
 
 
 def _run_checked(
@@ -1151,7 +1157,16 @@ def _read_log(process: subprocess.Popen[bytes]) -> str:
     if not log_path:
         return "(process log unavailable)"
     path = Path(log_path)
-    return path.read_text(encoding="utf-8", errors="replace")[-12000:] if path.exists() else "(log file unavailable)"
+    if not path.exists():
+        return "(log file unavailable)"
+    raw_command = process.args
+    if isinstance(raw_command, (str, bytes)):
+        command = (os.fsdecode(raw_command),)
+    else:
+        command = tuple(os.fsdecode(item) for item in raw_command)
+    environment = getattr(process, "_agentseek_environment", {})
+    diagnostic = _bounded_output_tail(path)
+    return _redact_diagnostic(diagnostic, command, environment)[-COMMAND_OUTPUT_TAIL_BYTES:]
 
 
 def _wait_for_port(port: int, processes: Sequence[subprocess.Popen[bytes]], deadline: float) -> None:
@@ -1216,6 +1231,7 @@ def _start_process(
         stream.close()
         raise
     process._agentseek_log_path = str(log_path)  # type: ignore[attr-defined]
+    process._agentseek_environment = dict(env)  # type: ignore[attr-defined]
     return process, stream
 
 
@@ -1406,6 +1422,31 @@ def _import_record(record: ImportRecord) -> dict[str, str]:
 
 
 def _require_value_free_proof(payload: Mapping[str, object], child_environment: Mapping[str, str]) -> None:
+    runtime = payload.get("runtime")
+    expected_runtime_fields = {"provider_port", "backend_port", "expected_ports"}
+    if not isinstance(runtime, dict) or set(runtime) != expected_runtime_fields:
+        raise RuntimeError("proof payload contains invalid runtime port record")
+    provider_port = runtime["provider_port"]
+    backend_port = runtime["backend_port"]
+    expected_ports = runtime["expected_ports"]
+    if (
+        type(provider_port) is not int
+        or type(backend_port) is not int
+        or not isinstance(expected_ports, list)
+        or not expected_ports
+        or any(type(port) is not int for port in expected_ports)
+    ):
+        raise RuntimeError("proof payload contains invalid runtime port record")
+    all_ports = [provider_port, backend_port, *expected_ports]
+    if (
+        any(not 1 <= port <= 65535 for port in all_ports)
+        or provider_port == backend_port
+        or len(set(expected_ports)) != len(expected_ports)
+        or provider_port not in expected_ports
+        or backend_port not in expected_ports
+    ):
+        raise RuntimeError("proof payload contains invalid runtime port record")
+
     serialized = json.dumps(payload, sort_keys=True)
     sensitive_names = {
         "OPENAI_API_KEY",
@@ -1658,6 +1699,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "template": args.template,
         "catalog_mode": args.catalog_mode,
         "database_mode": args.database_mode,
+        "runtime": {
+            "provider_port": port_plan.provider_port,
+            "backend_port": port_plan.backend_port,
+            "expected_ports": list(port_plan.expected_ports),
+        },
         "artifacts": {
             "agentseek": _artifact_record(launcher_artifact, launcher_source),
             "agentseek_api": _artifact_record(api_artifact, "pypi"),

@@ -325,6 +325,78 @@ def test_process_cleanup_attempts_provider_after_lifecycle_error(monkeypatch: py
     assert attempted == [lifecycle, provider]
 
 
+def test_read_log_redacts_process_environment_and_argv(tmp_path: Path) -> None:
+    proxy = "https://alice:real-secret@proxy.example:8443"
+    log_path = tmp_path / "runtime.log"
+    script = """
+import os
+import sys
+
+print("noise" * 3000)
+print(os.environ["HTTPS_PROXY"])
+print("alice")
+print("real-secret")
+print(f"prefix{os.environ['SHORT_SECRET']}suffix")
+print(sys.argv[1])
+"""
+    process, stream = smoke._start_process(
+        [sys.executable, "-c", script, "argv-secret"],
+        cwd=tmp_path,
+        env={**os.environ, "HTTPS_PROXY": proxy, "SHORT_SECRET": "abc"},
+        log_path=log_path,
+    )
+    try:
+        assert process.wait(timeout=5) == 0
+    finally:
+        stream.close()
+
+    diagnostic = smoke._read_log(process)
+
+    assert "<redacted>" in diagnostic
+    for secret in (proxy, "alice", "real-secret", "abc", "argv-secret"):
+        assert secret not in diagnostic
+    assert len(diagnostic) <= smoke.COMMAND_OUTPUT_TAIL_BYTES
+
+
+def test_read_log_reads_only_a_bounded_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    log_path = tmp_path / "large-runtime.log"
+    log_path.write_bytes(b"x" * (smoke.COMMAND_OUTPUT_TAIL_BYTES * 4) + b"tail-marker")
+    process = _Process(returncode=1)
+    process.args = ["/external/tool"]
+    process._agentseek_environment = {}
+    process._agentseek_log_path = str(log_path)
+    read_sizes: list[int] = []
+    original_open = smoke.Path.open
+
+    class TrackingStream:
+        def __init__(self, stream: object) -> None:
+            self.stream = stream
+
+        def __enter__(self) -> TrackingStream:
+            self.stream.__enter__()  # type: ignore[attr-defined]
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self.stream.__exit__(*args)  # type: ignore[attr-defined]
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.stream, name)
+
+        def read(self, size: int = -1) -> object:
+            read_sizes.append(size)
+            return self.stream.read(size)  # type: ignore[attr-defined]
+
+    def tracked_open(path: Path, *args: object, **kwargs: object) -> TrackingStream:
+        return TrackingStream(original_open(path, *args, **kwargs))
+
+    monkeypatch.setattr(smoke.Path, "open", tracked_open)
+
+    diagnostic = smoke._read_log(process)
+
+    assert diagnostic.endswith("tail-marker")
+    assert read_sizes == [smoke.COMMAND_OUTPUT_TAIL_BYTES]
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group ownership regression")
 def test_run_checked_timeout_reaps_owned_tree_and_reports_value_free_tail(tmp_path: Path) -> None:
     run_root = tmp_path / "run"
@@ -605,6 +677,39 @@ def test_windows_runtime_uses_sqlite_without_embedded_seekdb(tmp_path: Path) -> 
     assert environment["METADATA_DB_BACKEND"] == "sqlite"
     assert environment["METADATA_DB_URL"].startswith("sqlite+aiosqlite:///")
     assert "SEEKDB_EMBED_DIR" not in environment
+
+
+def test_proof_runtime_record_accepts_distinct_allocated_ports() -> None:
+    payload = {
+        "runtime": {
+            "provider_port": 43125,
+            "backend_port": 2024,
+            "expected_ports": [2024, 43125, 43126],
+        }
+    }
+
+    smoke._require_value_free_proof(payload, {})
+
+    assert payload["runtime"] == {
+        "provider_port": 43125,
+        "backend_port": 2024,
+        "expected_ports": [2024, 43125, 43126],
+    }
+
+
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        {},
+        {"provider_port": "43125", "backend_port": 2024, "expected_ports": [2024, 43125]},
+        {"provider_port": 43125, "backend_port": 0, "expected_ports": [0, 43125]},
+        {"provider_port": 43125, "backend_port": 2024, "expected_ports": [2024, 43125, 43125]},
+        {"provider_port": 43125, "backend_port": 2024, "expected_ports": [2024, 43126]},
+    ],
+)
+def test_proof_runtime_record_rejects_invalid_port_schema(runtime: dict[str, object]) -> None:
+    with pytest.raises(RuntimeError, match="runtime port record"):
+        smoke._require_value_free_proof({"runtime": runtime}, {})
 
 
 def test_linux_runtime_uses_external_embedded_directory() -> None:
