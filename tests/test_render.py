@@ -1369,7 +1369,7 @@ def test_reviewer_local_runtime_matrix_matches_rendered_template_set() -> None:
     for template_key in REVIEWER_LOCAL_RUNTIME_TEMPLATES:
         assert (TEMPLATES_ROOT / template_key).is_dir()
     assert '--template "${{ matrix.template }}"' in matrix
-    assert '"${{ runner.temp }}/generated-runtime"' in matrix
+    assert '--output-root "${{ runner.temp }}/r/${{ matrix.id }}"' in matrix
 
 
 def test_runtime_floor_smoke_rejects_empty_versions() -> None:

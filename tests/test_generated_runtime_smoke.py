@@ -731,7 +731,7 @@ def test_runtime_workflow_covers_every_retained_migration() -> None:
         " --agentseek-version 0.1.2"
         " --agentseek-api-version 0.2.2"
         ' --database-mode "${{ matrix.database }}"'
-        ' --output-root "${{ env.GENERATED_RUNTIME_ROOT }}/${{ matrix.id }}"'
+        ' --output-root "${{ runner.temp }}/r/${{ matrix.id }}"'
         ' --proof-output "${{ runner.temp }}/runtime-proof/${{ matrix.id }}.json"'
     )
     expected_upload = {
@@ -772,13 +772,26 @@ def test_runtime_workflow_covers_every_retained_migration() -> None:
         {"run": "uv sync --frozen --dev"},
         {
             "name": "Render, install, and exercise the generated lifecycle",
-            "env": {"GENERATED_RUNTIME_ROOT": "${{ runner.temp }}/generated-runtime"},
             "run": expected_harness_command,
         },
         expected_upload,
     ]
     assert "if" not in job["steps"][-1]
     _assert_no_workflow_secrets(job)
+
+
+def test_runtime_workflow_linux_output_paths_fit_embedded_socket_limit() -> None:
+    workflow = yaml.safe_load((smoke.ROOT / ".github" / "workflows" / "main.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["migrated-local-runtime-matrix"]
+    hosted_output_root = Path("/home/runner/work/_temp/r")
+    socket_limit = smoke.EMBEDDED_SOCKET_PATH_LIMITS["linux"]
+
+    for case in job["strategy"]["matrix"]["include"]:
+        if case["os"] != "ubuntu-latest":
+            continue
+        socket_path = hosted_output_root / case["id"] / "template-runtime-12345678" / "sdb/run/sql.sock"
+        path_length = len(os.fsencode(socket_path))
+        assert path_length <= socket_limit, f"{case['id']}: {path_length} > {socket_limit} bytes"
 
 
 def test_candidate_wheel_requires_matching_distribution_metadata(tmp_path: Path) -> None:
