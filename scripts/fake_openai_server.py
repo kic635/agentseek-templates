@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -59,8 +60,19 @@ class _Handler(BaseHTTPRequestHandler):
         del format, args
 
 
-def main() -> None:
-    ThreadingHTTPServer(("127.0.0.1", 2025), _Handler).serve_forever()
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", choices=("127.0.0.1",), required=True)
+    parser.add_argument("--port", type=int, required=True)
+    args = parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        parser.error("--port must be between 1 and 65535")
+    return args
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = _parse_args(argv)
+    ThreadingHTTPServer((args.host, args.port), _Handler).serve_forever()
 
 
 if __name__ == "__main__":
