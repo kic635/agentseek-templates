@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -23,10 +27,12 @@ class _Process:
     def __init__(self, *, returncode: int | None = None) -> None:
         self.returncode = returncode
         self.kill_calls = 0
+        self.poll_calls = 0
         self.wait_calls = 0
         self.wait_timeouts: list[float] = []
 
     def poll(self) -> int | None:
+        self.poll_calls += 1
         return self.returncode
 
     def wait(self, *, timeout: float) -> int:
@@ -38,16 +44,6 @@ class _Process:
     def kill(self) -> None:
         self.kill_calls += 1
         self.returncode = -9
-
-
-class _StubbornProcess(_Process):
-    def wait(self, *, timeout: float) -> int:
-        self.wait_calls += 1
-        self.wait_timeouts.append(timeout)
-        if self.wait_calls == 1:
-            raise smoke.subprocess.TimeoutExpired("agentseek dev", timeout)
-        self.returncode = -9
-        return -9
 
 
 def test_terminate_ignores_process_group_race(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,33 +62,116 @@ def test_terminate_ignores_process_group_race(monkeypatch: pytest.MonkeyPatch) -
     assert process.wait_calls == 1
 
 
-def test_terminate_does_not_signal_process_that_already_exited(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_terminate_signals_owned_group_when_leader_already_exited(monkeypatch: pytest.MonkeyPatch) -> None:
     process = _Process(returncode=0)
-    killpg = pytest.MonkeyPatch()
-    killpg.setattr(smoke.os, "killpg", lambda *_args: pytest.fail("must not signal exited process"))
-    try:
-        smoke._terminate(process)
-    finally:
-        killpg.undo()
+    signals: list[int] = []
 
+    def kill_group(pid: int, sig: int) -> None:
+        assert pid == process.pid
+        signals.append(sig)
+        if sig == 0:
+            raise ProcessLookupError
+
+    monkeypatch.setattr(smoke.os, "name", "posix")
+    monkeypatch.setattr(smoke.os, "killpg", kill_group)
+
+    smoke._terminate(process)
+
+    assert signals == [smoke.signal.SIGTERM, 0]
     assert process.wait_calls == 0
+
+
+def test_posix_group_check_treats_permission_denied_as_no_owned_members(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _Process(returncode=0)
+
+    def deny_group_check(_pid: int, sig: int) -> None:
+        assert sig == 0
+        raise PermissionError
+
+    monkeypatch.setattr(smoke.os, "killpg", deny_group_check)
+
+    assert smoke._wait_for_posix_group_exit(process, 1) is True
+    assert process.poll_calls == 1
+
+
+def test_posix_group_check_retries_permission_denied_until_leader_is_reaped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _Process()
+
+    def poll_until_reaped() -> int | None:
+        process.poll_calls += 1
+        if process.poll_calls == 1:
+            return None
+        process.returncode = 0
+        return 0
+
+    def deny_group_check(_pid: int, _sig: int) -> None:
+        raise PermissionError
+
+    process.poll = poll_until_reaped  # type: ignore[method-assign]
+    monkeypatch.setattr(smoke.os, "killpg", deny_group_check)
+
+    assert smoke._wait_for_posix_group_exit(process, 1) is True
+    assert process.poll_calls == 2
+
+
+def test_posix_group_check_reaps_zombie_leader_before_testing_descendants(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = _Process()
+    reaped = False
+
+    def reap_leader() -> int:
+        nonlocal reaped
+        process.poll_calls += 1
+        process.returncode = 0
+        reaped = True
+        return 0
+
+    def check_group(_pid: int, sig: int) -> None:
+        assert sig == 0
+        if reaped:
+            raise ProcessLookupError
+
+    process.poll = reap_leader  # type: ignore[method-assign]
+    monkeypatch.setattr(smoke.os, "killpg", check_group)
+
+    assert smoke._wait_for_posix_group_exit(process, 1) is True
+    assert process.poll_calls == 1
 
 
 def test_terminate_allows_launcher_to_clean_nested_process_groups(monkeypatch: pytest.MonkeyPatch) -> None:
     process = _Process()
+    wait_timeouts: list[float] = []
     monkeypatch.setattr(smoke.os, "name", "posix")
     monkeypatch.setattr(smoke.os, "killpg", lambda *_args: None)
+    monkeypatch.setattr(
+        smoke,
+        "_wait_for_posix_group_exit",
+        lambda _pid, timeout: wait_timeouts.append(timeout) or True,
+        raising=False,
+    )
 
     smoke._terminate(process)
 
-    assert process.wait_timeouts[0] >= 30
+    assert wait_timeouts[0] >= 30
 
 
 def test_terminate_force_kills_entire_posix_group_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
-    process = _StubbornProcess()
+    process = _Process()
     signals: list[tuple[int, int]] = []
+    wait_timeouts: list[float] = []
     monkeypatch.setattr(smoke.os, "name", "posix")
     monkeypatch.setattr(smoke.os, "killpg", lambda pid, sig: signals.append((pid, sig)))
+    monkeypatch.setattr(
+        smoke,
+        "_wait_for_posix_group_exit",
+        lambda _pid, timeout: wait_timeouts.append(timeout) or len(wait_timeouts) == 2,
+        raising=False,
+    )
 
     smoke._terminate(process)
 
@@ -100,7 +179,95 @@ def test_terminate_force_kills_entire_posix_group_after_grace(monkeypatch: pytes
         (process.pid, smoke.signal.SIGTERM),
         (process.pid, smoke.signal.SIGKILL),
     ]
+    assert wait_timeouts[0] >= 30
+    assert wait_timeouts[1] <= 10
     assert process.kill_calls == 0
+
+
+def test_windows_cleanup_uses_absolute_system_taskkill_with_minimal_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    system_root = tmp_path / "Windows"
+    taskkill = system_root / "System32" / "taskkill.exe"
+    taskkill.parent.mkdir(parents=True)
+    taskkill.touch()
+    process = _Process()
+    recorded: dict[str, object] = {}
+
+    def run(command: list[str], **kwargs: object) -> smoke.subprocess.CompletedProcess[bytes]:
+        recorded.update(command=command, **kwargs)
+        return smoke.subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(smoke.subprocess, "run", run)
+    monkeypatch.setattr(
+        smoke.runtime_proof,
+        "resolve_executable",
+        lambda _name: pytest.fail("cleanup must not search ambient PATH"),
+    )
+
+    smoke._terminate_windows_process(
+        process,
+        {
+            "SystemRoot": str(system_root),
+            "PATH": str(tmp_path / "hostile-bin"),
+            "SMOKE_SECRET": "must-not-propagate",
+        },
+    )
+
+    assert recorded["command"] == [str(taskkill.resolve()), "/PID", str(process.pid), "/T", "/F"]
+    assert recorded["env"] == {"SystemRoot": str(system_root)}
+    assert recorded["timeout"] == smoke.WINDOWS_TASKKILL_TIMEOUT_SECONDS
+    assert recorded["check"] is False
+
+
+def test_windows_cleanup_reaps_leader_when_taskkill_validation_fails(tmp_path: Path) -> None:
+    system_root = tmp_path / "Windows"
+    system_root.mkdir()
+    process = _Process()
+
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
+        smoke._terminate_windows_process(process, {"SystemRoot": str(system_root)})
+
+    assert process.kill_calls == 1
+    assert process.wait_calls == 1
+
+
+def test_windows_cleanup_fails_closed_when_leader_already_exited(tmp_path: Path) -> None:
+    system_root = tmp_path / "Windows"
+    taskkill = system_root / "System32" / "taskkill.exe"
+    taskkill.parent.mkdir(parents=True)
+    taskkill.touch()
+    process = _Process(returncode=1)
+
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
+        smoke._terminate_windows_process(process, {"SystemRoot": str(system_root)})
+
+
+@pytest.mark.parametrize("taskkill_result", [1, subprocess.TimeoutExpired("taskkill", 1)])
+def test_windows_cleanup_fails_closed_when_taskkill_cannot_prove_tree_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    taskkill_result: int | subprocess.TimeoutExpired,
+) -> None:
+    system_root = tmp_path / "Windows"
+    taskkill = system_root / "System32" / "taskkill.exe"
+    taskkill.parent.mkdir(parents=True)
+    taskkill.touch()
+    process = _Process()
+
+    def run(command: list[str], **_kwargs: object) -> smoke.subprocess.CompletedProcess[bytes]:
+        if isinstance(taskkill_result, BaseException):
+            raise taskkill_result
+        return smoke.subprocess.CompletedProcess(command, taskkill_result)
+
+    monkeypatch.setattr(smoke.subprocess, "run", run)
+
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
+        smoke._terminate_windows_process(process, {"SystemRoot": str(system_root)})
+
+    assert process.kill_calls == 1
+    assert process.wait_calls == 1
 
 
 def test_process_cleanup_attempts_provider_after_lifecycle_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -108,7 +275,7 @@ def test_process_cleanup_attempts_provider_after_lifecycle_error(monkeypatch: py
     provider = _Process()
     attempted: list[_Process] = []
 
-    def terminate(process: _Process) -> None:
+    def terminate(process: _Process, **_kwargs: object) -> None:
         attempted.append(process)
         if process is lifecycle:
             raise RuntimeError("lifecycle cleanup failed")
@@ -119,6 +286,126 @@ def test_process_cleanup_attempts_provider_after_lifecycle_error(monkeypatch: py
         smoke._terminate_processes(lifecycle, provider)
 
     assert attempted == [lifecycle, provider]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group ownership regression")
+def test_run_checked_timeout_reaps_owned_tree_and_reports_value_free_tail(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    child_pid_path = run_root / "child.pid"
+    secret = "synthetic-provider-secret"
+    script = """
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+print(os.environ["SMOKE_SECRET"] * 20000, flush=True)
+time.sleep(60)
+"""
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match="timed out") as exc_info:
+        smoke._run_checked(
+            [sys.executable, "-c", script, str(child_pid_path)],
+            cwd=run_root,
+            env={**os.environ, "SMOKE_SECRET": secret},
+            label="bounded command regression",
+            run_root=run_root,
+            timeout=0.25,
+        )
+
+    assert time.monotonic() - started < 10
+    assert secret not in str(exc_info.value)
+    assert "output tail:" in str(exc_info.value)
+    assert len(str(exc_info.value)) <= smoke.COMMAND_OUTPUT_TAIL_BYTES + 256
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(child_pid, smoke.signal.SIGKILL)
+        pytest.fail("timed-out command descendant remained alive")
+
+    logs = list((run_root / "command-logs").glob("*.log"))
+    assert len(logs) == 1
+    assert logs[0].stat().st_mode & 0o777 == 0o600
+    assert logs[0].stat().st_size <= smoke.COMMAND_OUTPUT_TAIL_BYTES
+
+
+def test_run_checked_caps_both_logs_and_redacts_short_sensitive_values(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    secret = "abc"
+    script = """
+import os
+import sys
+
+print("o" * 20000)
+print("e" * 20000, file=sys.stderr)
+print(f"prefix{os.environ['SHORT_SECRET']}suffix", file=sys.stderr)
+raise SystemExit(3)
+"""
+
+    with pytest.raises(RuntimeError, match="failed with status 3") as exc_info:
+        smoke._run_checked(
+            [sys.executable, "-c", script],
+            cwd=run_root,
+            env={**os.environ, "SHORT_SECRET": secret},
+            label="bounded redaction regression",
+            run_root=run_root,
+            timeout=5,
+        )
+
+    assert secret not in str(exc_info.value)
+    logs = list((run_root / "command-logs").glob("*"))
+    assert len(logs) == 2
+    assert all(path.stat().st_size <= smoke.COMMAND_OUTPUT_TAIL_BYTES for path in logs)
+    assert all(path.stat().st_mode & 0o777 == 0o600 for path in logs)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX inherited-pipe regression")
+def test_run_checked_fails_closed_without_blocking_on_detached_inherited_pipe(tmp_path: Path) -> None:
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    child_pid_path = run_root / "detached.pid"
+    script = """
+import subprocess
+import sys
+from pathlib import Path
+
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(7)"],
+    start_new_session=True,
+)
+Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+"""
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(RuntimeError, match="command cleanup could not be verified"):
+            smoke._run_checked(
+                [sys.executable, "-c", script, str(child_pid_path)],
+                cwd=run_root,
+                env=os.environ,
+                label="detached inherited pipe regression",
+                run_root=run_root,
+                timeout=2,
+            )
+        assert time.monotonic() - started < 6.5
+    finally:
+        if child_pid_path.is_file():
+            child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(child_pid, smoke.signal.SIGKILL)
 
 
 @pytest.mark.parametrize(
@@ -169,8 +456,10 @@ def test_default_catalog_port_context_uses_packaged_locked_template(
         cwd: Path,
         env: dict[str, str],
         label: str,
+        run_root: Path,
+        timeout: float,
     ) -> smoke.subprocess.CompletedProcess[str]:
-        recorded.update(command=command, cwd=cwd, env=env, label=label)
+        recorded.update(command=command, cwd=cwd, env=env, label=label, run_root=run_root, timeout=timeout)
         return smoke.subprocess.CompletedProcess(
             command,
             0,
@@ -204,6 +493,8 @@ def test_default_catalog_port_context_uses_packaged_locked_template(
         "cwd": run_root,
         "env": launcher_env,
         "label": "prepare packaged default catalog template",
+        "run_root": run_root,
+        "timeout": smoke.CATALOG_PREPARE_TIMEOUT_SECONDS,
     }
 
 
@@ -367,6 +658,72 @@ def test_candidate_wheel_requires_matching_distribution_metadata(tmp_path: Path)
 
     with pytest.raises(RuntimeError, match="metadata"):
         smoke.validate_candidate_wheel(wheel, version="0.1.3", forbidden_roots=[smoke.ROOT])
+
+
+def test_candidate_wheel_stages_validated_bytes_before_source_mutation(tmp_path: Path) -> None:
+    source = tmp_path / "external" / "agentseek-0.1.3-py3-none-any.whl"
+    source.parent.mkdir()
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr(
+            "agentseek-0.1.3.dist-info/METADATA",
+            "Metadata-Version: 2.4\nName: agentseek\nVersion: 0.1.3\n",
+        )
+        archive.writestr("agentseek/__init__.py", '__version__ = "0.1.3"\n')
+    validated_bytes = source.read_bytes()
+    expected_digest = hashlib.sha256(validated_bytes).hexdigest()
+    artifact_dir = tmp_path / "run" / "artifacts"
+
+    artifact = smoke.validate_candidate_wheel(
+        source,
+        version="0.1.3",
+        forbidden_roots=[smoke.ROOT],
+        destination=artifact_dir,
+    )
+    source.write_bytes(b"mutated after staging")
+
+    assert artifact.path == artifact_dir / source.name
+    assert artifact.path.read_bytes() == validated_bytes
+    assert artifact.sha256 == expected_digest
+    assert artifact.url == source.resolve().as_uri()
+    assert not list(artifact_dir.glob(".*.tmp"))
+
+
+def test_catalog_proof_records_observed_lock_without_render_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    template = "langchain/cli-remote"
+    lock = {
+        "catalog_repository": "https://github.com/agentseek-ai/agentseek-templates.git",
+        "catalog_commit": "a" * 40,
+        "catalog_release": "v0.1.0",
+        "core_repository": "https://github.com/ob-labs/agentseek.git",
+        "core_commit": "b" * 40,
+        "core_release": "core-snapshot-v0.1.0",
+        "templates": {template: "CLI Remote"},
+        "template_digests": {template: "c" * 64},
+    }
+    completed = smoke.subprocess.CompletedProcess(
+        [],
+        0,
+        stdout=json.dumps({"sha256": "d" * 64, "lock": lock}),
+        stderr="",
+    )
+    monkeypatch.setattr(smoke, "_run_checked", lambda *_args, **_kwargs: completed)
+    launcher_root = tmp_path / "run" / "launcher-venv"
+    launcher_root.mkdir(parents=True)
+
+    record = smoke._read_catalog_proof(
+        launcher_root / "bin" / "python",
+        {},
+        launcher_root,
+        template,
+        "default",
+    )
+
+    assert record["sha256"] == "d" * 64
+    assert record["template_digest"] == "c" * 64
+    assert "used_for_render" not in record
 
 
 def test_generated_lock_validates_uv_flat_index_wheel(tmp_path: Path) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import io
 import json
 import os
 import platform
@@ -14,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 import urllib.error
@@ -24,7 +26,7 @@ from collections.abc import Mapping, Sequence
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
-from typing import Literal, NamedTuple
+from typing import BinaryIO, Literal, NamedTuple
 
 from cookiecutter.main import cookiecutter
 
@@ -39,6 +41,19 @@ FAKE_PROVIDER = ROOT / "scripts" / "fake_openai_server.py"
 PYPI_INDEX = "https://pypi.org/simple"
 PROBE_GRAPH_ID = "release_contract_probe"
 LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS = 45
+FORCE_SHUTDOWN_TIMEOUT_SECONDS = 10
+WINDOWS_TASKKILL_TIMEOUT_SECONDS = 10
+WINDOWS_TREE_CLEANUP_ERROR = "Windows process tree cleanup could not be verified"
+PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
+COMMAND_OUTPUT_TAIL_BYTES = 12_000
+COMMAND_OUTPUT_DRAIN_TIMEOUT_SECONDS = 5
+COMMAND_CLEANUP_GRACE_SECONDS = 5
+COMMAND_CLEANUP_FORCE_SECONDS = 5
+CATALOG_PREPARE_TIMEOUT_SECONDS = 180
+ENVIRONMENT_CREATE_TIMEOUT_SECONDS = 120
+DEPENDENCY_INSTALL_TIMEOUT_SECONDS = 900
+TEMPLATE_RENDER_TIMEOUT_SECONDS = 300
+CATALOG_PROOF_TIMEOUT_SECONDS = 30
 EMBEDDED_SOCKET_PATH_LIMITS = {"darwin": 103, "linux": 107}
 EMBEDDED_SOCKET_PATH_ERROR = "embedded seekdb socket path exceeds platform limit"
 FIXED_BACKEND_TEMPLATES = frozenset(
@@ -246,11 +261,42 @@ def _normalized_distribution(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
 
 
+def _atomic_stage_bytes(path: Path, payload: bytes) -> None:
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+        remaining = memoryview(payload)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise OSError("candidate wheel staging made no progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def validate_candidate_wheel(
     path: Path,
     *,
     version: str,
     forbidden_roots: Sequence[Path],
+    destination: Path | None = None,
 ) -> WheelArtifact:
     if not path.is_absolute():
         raise RuntimeError(f"candidate wheel path must be absolute: {path}")
@@ -277,7 +323,8 @@ def validate_candidate_wheel(
         raise RuntimeError(f"candidate wheel filename must match agentseek-{version}-py3-none-any.whl: {resolved.name}")
 
     try:
-        with zipfile.ZipFile(resolved) as archive:
+        payload = resolved.read_bytes()
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             metadata_names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
             if len(metadata_names) != 1:
                 raise RuntimeError("candidate wheel metadata must contain exactly one dist-info/METADATA file")
@@ -288,12 +335,22 @@ def validate_candidate_wheel(
     if _normalized_distribution(str(message.get("Name", ""))) != "agentseek" or message.get("Version") != version:
         raise RuntimeError(f"candidate wheel metadata does not match agentseek=={version}")
 
-    payload = resolved.read_bytes()
+    install_path = resolved
+    if destination is not None:
+        destination.mkdir(mode=0o700, parents=True, exist_ok=True)
+        staged_root = destination.resolve(strict=True)
+        for root in forbidden_roots:
+            repository = root.resolve()
+            if staged_root == repository or staged_root.is_relative_to(repository):
+                raise RuntimeError(f"candidate wheel staging must be outside participating repositories: {staged_root}")
+        install_path = staged_root / resolved.name
+        _atomic_stage_bytes(install_path, payload)
+
     return WheelArtifact(
         name="agentseek",
         version=version,
         filename=resolved.name,
-        path=resolved,
+        path=install_path,
         sha256=hashlib.sha256(payload).hexdigest(),
         url=resolved.as_uri(),
     )
@@ -381,24 +438,197 @@ def _minimal_environment(
     )
 
 
+class _BoundedCapture:
+    def __init__(self) -> None:
+        self._payload = bytearray()
+        self._lock = threading.Lock()
+
+    def append(self, chunk: bytes) -> None:
+        with self._lock:
+            self._payload.extend(chunk)
+            excess = len(self._payload) - COMMAND_OUTPUT_TAIL_BYTES
+            if excess > 0:
+                del self._payload[:excess]
+
+    def snapshot(self) -> bytes:
+        with self._lock:
+            return bytes(self._payload)
+
+
+def _private_command_output(run_root: Path, suffix: str) -> Path:
+    log_dir = run_root / "command-logs"
+    log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name != "nt":
+        log_dir.chmod(0o700)
+    descriptor, raw_path = tempfile.mkstemp(dir=log_dir, prefix="command-", suffix=suffix)
+    try:
+        if os.name != "nt":
+            os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+    return Path(raw_path)
+
+
+def _drain_bounded_output(stream: BinaryIO, capture: _BoundedCapture) -> None:
+    try:
+        while chunk := stream.read(65_536):
+            capture.append(chunk)
+    except (OSError, ValueError):
+        return
+    finally:
+        with contextlib.suppress(OSError):
+            stream.close()
+
+
+def _wait_for_output_drains(threads: Sequence[threading.Thread], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    for thread in threads:
+        thread.join(max(0.0, deadline - time.monotonic()))
+    return not any(thread.is_alive() for thread in threads)
+
+
+def _persist_command_tail(path: Path, capture: _BoundedCapture) -> None:
+    payload = capture.snapshot()
+    with path.open("wb") as stream:
+        stream.write(payload)
+
+
+def _bounded_output_tail(path: Path) -> str:
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(max(0, size - COMMAND_OUTPUT_TAIL_BYTES))
+        return stream.read(COMMAND_OUTPUT_TAIL_BYTES).decode("utf-8", errors="replace")
+
+
+def _value_free_tail(
+    stdout_path: Path,
+    stderr_path: Path,
+    command: Sequence[str],
+    environment: Mapping[str, str],
+) -> str:
+    stdout_tail = _bounded_output_tail(stdout_path)
+    stderr_tail = _bounded_output_tail(stderr_path)
+    tail = "\n".join(part for part in (stdout_tail, stderr_tail) if part).strip()
+    command_values = {str(value) for value in command if value}
+    environment_values = {value for value in environment.values() if value}
+    long_values = {value for value in (*environment_values, *command_values) if len(value) >= 4}
+    sensitive_names = re.compile(r"(?:AUTH|CREDENTIAL|KEY|PASSWORD|SECRET|SENTINEL|TOKEN)", re.IGNORECASE)
+    short_values = {str(value) for value in command if 0 < len(str(value)) < 4}
+    for name, value in environment.items():
+        if not value or len(value) >= 4:
+            continue
+        has_proxy_userinfo = False
+        if "PROXY" in name.upper():
+            try:
+                parsed = urllib.parse.urlsplit(value)
+                has_proxy_userinfo = parsed.username is not None or parsed.password is not None
+            except ValueError:
+                pass
+        if sensitive_names.search(name) or has_proxy_userinfo:
+            short_values.add(value)
+    for value in sorted(long_values, key=len, reverse=True):
+        tail = tail.replace(value, "<redacted>")
+    for value in sorted(short_values, key=len, reverse=True):
+        tail = tail.replace(value, "<redacted>")
+    return tail[-COMMAND_OUTPUT_TAIL_BYTES:]
+
+
 def _run_checked(
     command: Sequence[str],
     *,
     cwd: Path,
     env: Mapping[str, str],
     label: str,
+    run_root: Path,
+    timeout: float,
 ) -> subprocess.CompletedProcess[str]:
-    completed = subprocess.run(
-        list(command),
-        cwd=cwd,
-        env=dict(env),
-        check=False,
-        capture_output=True,
-        text=True,
+    if timeout <= 0:
+        raise RuntimeError(f"{label} has no positive execution timeout")
+    resolved_run_root = run_root.resolve(strict=True)
+    resolved_cwd = cwd.resolve(strict=True)
+    if not resolved_cwd.is_relative_to(resolved_run_root):
+        raise RuntimeError(f"{label} working directory escaped the managed run root")
+    stdout_path = _private_command_output(resolved_run_root, ".log")
+    stderr_path = _private_command_output(resolved_run_root, ".err")
+    stdout_capture = _BoundedCapture()
+    stderr_capture = _BoundedCapture()
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+    try:
+        process = subprocess.Popen(
+            list(command),
+            cwd=resolved_cwd,
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=os.name != "nt",
+            creationflags=creationflags,
+        )
+    except OSError:
+        raise RuntimeError(f"{label} could not start") from None
+
+    assert process.stdout is not None and process.stderr is not None
+    threads = (
+        threading.Thread(target=_drain_bounded_output, args=(process.stdout, stdout_capture), daemon=True),
+        threading.Thread(target=_drain_bounded_output, args=(process.stderr, stderr_capture), daemon=True),
     )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()[-12000:]
-        raise RuntimeError(f"{label} failed with status {completed.returncode}: {list(command)!r}\n{detail}")
+    for thread in threads:
+        thread.start()
+
+    timed_out = False
+    cleanup_failed = False
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            _terminate(
+                process,
+                cleanup_environment=env,
+                grace_timeout=COMMAND_CLEANUP_GRACE_SECONDS,
+                force_timeout=COMMAND_CLEANUP_FORCE_SECONDS,
+            )
+        except BaseException:
+            cleanup_failed = True
+        returncode = process.poll()
+
+    if not _wait_for_output_drains(threads, COMMAND_OUTPUT_DRAIN_TIMEOUT_SECONDS):
+        try:
+            _terminate(
+                process,
+                cleanup_environment=env,
+                grace_timeout=COMMAND_CLEANUP_GRACE_SECONDS,
+                force_timeout=COMMAND_CLEANUP_FORCE_SECONDS,
+            )
+        except BaseException:
+            cleanup_failed = True
+        if not _wait_for_output_drains(threads, PROCESS_GROUP_POLL_INTERVAL_SECONDS):
+            cleanup_failed = True
+
+    _persist_command_tail(stdout_path, stdout_capture)
+    _persist_command_tail(stderr_path, stderr_capture)
+
+    if timed_out:
+        detail = _value_free_tail(stdout_path, stderr_path, command, env)
+        message = f"{label} timed out after {timeout:g} seconds"
+        if cleanup_failed:
+            message += " and command cleanup failed"
+        if detail:
+            message += f"\noutput tail:\n{detail}"
+        raise RuntimeError(message)
+    if cleanup_failed:
+        raise RuntimeError(f"{label} command cleanup could not be verified")
+
+    stdout = _bounded_output_tail(stdout_path)
+    stderr = _bounded_output_tail(stderr_path)
+    completed = subprocess.CompletedProcess(list(command), returncode, stdout=stdout, stderr=stderr)
+    if returncode != 0:
+        detail = _value_free_tail(stdout_path, stderr_path, command, env)
+        message = f"{label} failed with status {returncode}"
+        if detail:
+            message += f"\noutput tail:\n{detail}"
+        raise RuntimeError(message)
     return completed
 
 
@@ -430,6 +660,8 @@ def _port_template_root(
         cwd=run_root,
         env=launcher_environment,
         label="prepare packaged default catalog template",
+        run_root=run_root,
+        timeout=CATALOG_PREPARE_TIMEOUT_SECONDS,
     )
     try:
         payload = json.loads(completed.stdout)
@@ -468,6 +700,8 @@ def _create_launcher_environment(
         cwd=run_root,
         env=env,
         label="create launcher virtual environment",
+        run_root=run_root,
+        timeout=ENVIRONMENT_CREATE_TIMEOUT_SECONDS,
     )
     launcher_python = _environment_python(launcher_root)
     _run_checked(
@@ -486,6 +720,8 @@ def _create_launcher_environment(
         cwd=run_root,
         env=env,
         label="install published AgentSeek launcher",
+        run_root=run_root,
+        timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
     )
     agentseek_executable = _environment_executable(launcher_root, "agentseek")
     if not launcher_python.is_file() or not agentseek_executable.is_file():
@@ -610,9 +846,17 @@ def _render_default(
     *,
     output_root: Path,
     env: Mapping[str, str],
+    run_root: Path,
 ) -> Path:
     before = {path.resolve() for path in output_root.iterdir() if path.is_dir()}
-    _run_checked(command, cwd=output_root, env=env, label="render installed default catalog template")
+    _run_checked(
+        command,
+        cwd=output_root,
+        env=env,
+        label="render installed default catalog template",
+        run_root=run_root,
+        timeout=TEMPLATE_RENDER_TIMEOUT_SECONDS,
+    )
     created = [path.resolve() for path in output_root.iterdir() if path.is_dir() and path.resolve() not in before]
     if len(created) != 1:
         raise RuntimeError(f"default catalog render created {len(created)} project directories; expected one")
@@ -674,6 +918,7 @@ def _install_generated_project(
     toolchain: Toolchain,
     env: Mapping[str, str],
     template: str,
+    run_root: Path,
 ) -> None:
     artifact_dir = api_artifact.path.parent.resolve()
     _run_checked(
@@ -690,6 +935,8 @@ def _install_generated_project(
         cwd=generated,
         env=env,
         label=f"{template}: install generated Python environment",
+        run_root=run_root,
+        timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
     )
     frontend_command = build_frontend_install_command(generated, toolchain.npm)
     if frontend_command is not None:
@@ -698,6 +945,8 @@ def _install_generated_project(
             cwd=generated,
             env=env,
             label=f"{template}: install generated frontend",
+            run_root=run_root,
+            timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
         )
         if not (generated / "frontend" / "node_modules").is_dir():
             raise RuntimeError(f"{template}: npm exited successfully without creating frontend/node_modules")
@@ -794,6 +1043,8 @@ def _read_catalog_proof(
         cwd=launcher_root,
         env=launcher_env,
         label="read packaged AgentSeek catalog lock",
+        run_root=launcher_root.parent,
+        timeout=CATALOG_PROOF_TIMEOUT_SECONDS,
     )
     try:
         payload = json.loads(completed.stdout)
@@ -811,7 +1062,7 @@ def _read_catalog_proof(
         "core_commit",
         "core_release",
     )
-    coordinates: dict[str, object] = {"sha256": digest, "used_for_render": catalog_mode == "default"}
+    coordinates: dict[str, object] = {"sha256": digest}
     for name in coordinate_names:
         value = lock.get(name)
         if not isinstance(value, str) or not value:
@@ -968,41 +1219,128 @@ def _start_process(
     return process, stream
 
 
-def _terminate(process: subprocess.Popen[bytes]) -> None:
+def _wait_for_posix_group_exit(process: subprocess.Popen[bytes], timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        leader_reaped = process.poll() is not None
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            if leader_reaped:
+                # Once the direct child is reaped, EPERM proves that no
+                # remaining group member is signalable by this harness.
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(PROCESS_GROUP_POLL_INTERVAL_SECONDS)
+
+
+def _windows_cleanup_tool(environment: Mapping[str, str]) -> tuple[Path, dict[str, str]]:
+    selected_name = next(
+        (name for name in ("SystemRoot", "SYSTEMROOT", "WINDIR") if environment.get(name)),
+        None,
+    )
+    if selected_name is None:
+        raise RuntimeError("Windows cleanup environment has no system root")
+    raw_root = environment[selected_name]
+    system_root = Path(raw_root)
+    if not system_root.is_absolute():
+        raise RuntimeError("Windows cleanup system root is not absolute")
+    try:
+        taskkill = (system_root / "System32" / "taskkill.exe").resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeError("Windows cleanup taskkill is unavailable") from exc
+    if not taskkill.is_file() or taskkill.is_relative_to(ROOT.resolve()):
+        raise RuntimeError("Windows cleanup taskkill path is invalid")
+    return taskkill, {selected_name: raw_root}
+
+
+def _terminate_windows_process(process: subprocess.Popen[bytes], environment: Mapping[str, str]) -> None:
     if process.poll() is not None:
-        return
-    if os.name == "nt":
-        taskkill = runtime_proof.resolve_executable("taskkill")
-        subprocess.run(
+        raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
+    try:
+        taskkill, cleanup_environment = _windows_cleanup_tool(environment)
+    except RuntimeError:
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+        raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from None
+    try:
+        completed = subprocess.run(
             [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
             check=False,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            cwd=taskkill.parent,
+            env=cleanup_environment,
+            timeout=WINDOWS_TASKKILL_TIMEOUT_SECONDS,
         )
-    else:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(process.pid, signal.SIGTERM)
+    except (OSError, subprocess.TimeoutExpired):
+        completed = None
+    if completed is None or completed.returncode != 0:
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+        raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
     try:
-        process.wait(timeout=LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS)
+        process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
     except subprocess.TimeoutExpired:
-        if os.name == "nt":
+        with contextlib.suppress(OSError):
             process.kill()
-        else:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-        process.wait(timeout=10)
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+        raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from None
+
+
+def _terminate(
+    process: subprocess.Popen[bytes],
+    *,
+    cleanup_environment: Mapping[str, str] | None = None,
+    grace_timeout: float = LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS,
+    force_timeout: float = FORCE_SHUTDOWN_TIMEOUT_SECONDS,
+) -> None:
+    if os.name == "nt":
+        _terminate_windows_process(process, cleanup_environment or {})
+        return
+
+    group_missing = False
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        group_missing = True
+    group_exited = group_missing or _wait_for_posix_group_exit(process, grace_timeout)
+    if not group_exited:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        if not _wait_for_posix_group_exit(process, force_timeout):
+            raise RuntimeError("owned process group did not exit after forced cleanup")
+
+    if process.poll() is None:
+        try:
+            process.wait(timeout=force_timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=force_timeout)
 
 
 def _terminate_processes(
     lifecycle: subprocess.Popen[bytes] | None,
     provider: subprocess.Popen[bytes] | None,
+    *,
+    cleanup_environment: Mapping[str, str] | None = None,
 ) -> None:
     first_error: BaseException | None = None
     for process in (lifecycle, provider):
         if process is None:
             continue
         try:
-            _terminate(process)
+            _terminate(process, cleanup_environment=cleanup_environment)
         except BaseException as exc:
             if first_error is None:
                 first_error = exc
@@ -1132,6 +1470,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.agentseek_wheel,
             version=args.agentseek_version,
             forbidden_roots=forbidden_roots,
+            destination=artifact_dir,
         )
         launcher_source = "candidate-path"
 
@@ -1185,6 +1524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 create_command,
                 output_root=render_root,
                 env=launcher_environment,
+                run_root=run_root,
             )
 
         _write_generated_env(generated)
@@ -1211,6 +1551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             toolchain,
             child_environment,
             args.template,
+            run_root,
         )
         if not child_python.is_file():
             raise RuntimeError(f"generated sync did not create child interpreter: {child_python}")
@@ -1297,7 +1638,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         finally:
             try:
-                _terminate_processes(lifecycle, provider)
+                _terminate_processes(
+                    lifecycle,
+                    provider,
+                    cleanup_environment=launcher_environment,
+                )
             finally:
                 try:
                     if lifecycle_stream is not None:
