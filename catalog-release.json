@@ -3,8 +3,8 @@
   "catalog_release": "v0.1.1",
   "lifecycle_version": 2,
   "core_repository": "https://github.com/ob-labs/agentseek.git",
-  "core_commit": "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc",
-  "core_release": "v0.1.1",
+  "core_commit": "900f89518c32f8570d7648897394ed96a86a647a",
+  "core_release": "v0.1.2",
   "templates_root": "templates",
   "index_path": "templates/index.json"
 }

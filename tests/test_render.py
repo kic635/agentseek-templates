@@ -21,7 +21,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES_ROOT = REPOSITORY_ROOT / "templates"
 INDEX = json.loads((TEMPLATES_ROOT / "index.json").read_text(encoding="utf-8"))
 CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
-CORE_COMMIT = "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc"
+CORE_COMMIT = "900f89518c32f8570d7648897394ed96a86a647a"
 AGENTSEEK_API_VERSION = "0.2.2"
 AGENTSEEK_API_DEPENDENCY = f"agentseek-api[embedded]=={AGENTSEEK_API_VERSION}"
 AGENTSEEK_API_CANONICAL_NAME = canonicalize_name("agentseek-api")
