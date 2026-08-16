@@ -69,6 +69,7 @@ class SmokeProfile(NamedTuple):
     graph_id: str
     run_input: Mapping[str, object]
     environment: Mapping[str, str]
+    uses_preexisting_embedded_database: bool = False
 
 
 COMMON_PROVIDER_ENV = {
@@ -91,7 +92,12 @@ PROFILES = {
         CHAT_INPUT,
         {"TAVILY_API_KEY": "smoke-tavily-key"},
     ),
-    "langchain/agentic-rag": SmokeProfile("rag", CHAT_INPUT, {"SEEKDB_MODE": "embedded"}),
+    "langchain/agentic-rag": SmokeProfile(
+        "rag",
+        CHAT_INPUT,
+        {"SEEKDB_MODE": "embedded"},
+        uses_preexisting_embedded_database=True,
+    ),
     "langchain/agentic-rag-hybrid": SmokeProfile(
         "hybrid-rag",
         CHAT_INPUT,
@@ -210,7 +216,7 @@ def build_create_command(
 def build_frontend_install_command(generated: Path, npm_executable: Path) -> list[str] | None:
     if not (generated / "frontend" / "package.json").is_file():
         return None
-    return [str(npm_executable), "install", "--prefix", "frontend"]
+    return [str(npm_executable), "install"]
 
 
 def build_runtime_environment(
@@ -946,15 +952,16 @@ def _install_generated_project(
     )
     frontend_command = build_frontend_install_command(generated, toolchain.npm)
     if frontend_command is not None:
+        frontend_root = generated / "frontend"
         _run_checked(
             frontend_command,
-            cwd=generated,
+            cwd=frontend_root,
             env=env,
             label=f"{template}: install generated frontend",
             run_root=run_root,
             timeout=DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
         )
-        if not (generated / "frontend" / "node_modules").is_dir():
+        if not (frontend_root / "node_modules").is_dir():
             raise RuntimeError(f"{template}: npm exited successfully without creating frontend/node_modules")
 
 
@@ -1098,6 +1105,8 @@ def _child_environment(
     provider_url = f"http://127.0.0.1:{provider_port}/v1"
     backend_url = f"http://127.0.0.1:{backend_port}"
     database_token = hashlib.sha256(str(run_root.resolve()).encode()).hexdigest()[:12]
+    api_database_name = f"smoke_api_{database_token}"
+    seekdb_database_name = f"smoke_seekdb_{database_token}"
     database_root = (run_root / "databases").resolve()
     database_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     result = dict(base)
@@ -1126,13 +1135,24 @@ def _child_environment(
             "LANGGRAPH_HOST": "127.0.0.1",
             "FRONTEND_HOST": "127.0.0.1",
             "SEEKDB_PATH": str(database_root / "rag-seekdb"),
-            "SEEKDB_DB_NAME": f"smoke_seekdb_{database_token}",
-            "OCEANBASE_DB_NAME": f"smoke_api_{database_token}",
+            "SEEKDB_DB_NAME": seekdb_database_name,
+            "OCEANBASE_DB_NAME": api_database_name,
             "SEEKDB_HOST": "127.0.0.1",
             "SEEKDB_PORT": "1",
         }
     )
     result.update(runtime_environment)
+    if profile.uses_preexisting_embedded_database:
+        embed_dir = result.get("SEEKDB_EMBED_DIR")
+        if result.get("SEEKDB_EMBED") != "true" or not embed_dir:
+            raise RuntimeError("profile requires an embedded seekdb runtime")
+        result.update(
+            {
+                "SEEKDB_PATH": embed_dir,
+                "SEEKDB_DB_NAME": "test",
+                "OCEANBASE_DB_NAME": "test",
+            }
+        )
     return result
 
 

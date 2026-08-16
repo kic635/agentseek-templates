@@ -660,9 +660,58 @@ def test_frontend_install_uses_resolved_windows_executable(tmp_path: Path) -> No
     assert smoke.build_frontend_install_command(generated, npm) == [
         str(npm),
         "install",
-        "--prefix",
-        "frontend",
     ]
+
+
+def test_generated_frontend_install_runs_from_detected_frontend_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    generated = run_root / "rendered" / "mcp_deepagent"
+    frontend = generated / "frontend"
+    frontend.mkdir(parents=True)
+    (frontend / "package.json").write_text("{}\n", encoding="utf-8")
+    artifact_path = run_root / "artifacts" / "agentseek_api-0.2.2-py3-none-any.whl"
+    artifact_path.parent.mkdir()
+    artifact_path.write_bytes(b"wheel")
+    artifact = smoke.WheelArtifact(
+        name="agentseek-api",
+        version="0.2.2",
+        filename=artifact_path.name,
+        path=artifact_path,
+        sha256="a" * 64,
+        url="https://files.pythonhosted.org/agentseek_api-0.2.2-py3-none-any.whl",
+    )
+    npm = Path(r"C:\hostedtoolcache\node\npm.CMD")
+    toolchain = smoke.Toolchain(
+        uv=Path(r"C:\hostedtoolcache\uv.exe"),
+        git=Path(r"C:\Program Files\Git\bin\git.exe"),
+        node=Path(r"C:\hostedtoolcache\node\node.exe"),
+        npm=npm,
+        sh=None,
+    )
+    calls: list[dict[str, object]] = []
+
+    def run_checked(command: list[str], **kwargs: object) -> smoke.subprocess.CompletedProcess[str]:
+        calls.append({"command": command, **kwargs})
+        if kwargs["label"] == "deepagents/mcp: install generated frontend":
+            (frontend / "node_modules").mkdir()
+        return smoke.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(smoke, "_run_checked", run_checked)
+
+    smoke._install_generated_project(
+        generated,
+        artifact,
+        toolchain,
+        {},
+        "deepagents/mcp",
+        run_root,
+    )
+
+    assert calls[1]["command"] == [str(npm), "install"]
+    assert calls[1]["cwd"] == frontend
 
 
 def test_frontend_install_is_absent_for_cli_remote(tmp_path: Path) -> None:
@@ -677,6 +726,48 @@ def test_windows_runtime_uses_sqlite_without_embedded_seekdb(tmp_path: Path) -> 
     assert environment["METADATA_DB_BACKEND"] == "sqlite"
     assert environment["METADATA_DB_URL"].startswith("sqlite+aiosqlite:///")
     assert "SEEKDB_EMBED_DIR" not in environment
+
+
+def test_agentic_rag_uses_the_preexisting_embedded_database_for_eager_import(tmp_path: Path) -> None:
+    embed_dir = (tmp_path / "sdb").resolve()
+    environment = smoke._child_environment(
+        {},
+        smoke.PROFILES["langchain/agentic-rag"],
+        tmp_path,
+        provider_port=43125,
+        backend_port=2024,
+        runtime_environment={
+            "SEEKDB_EMBED": "true",
+            "SEEKDB_EMBED_DIR": str(embed_dir),
+        },
+    )
+
+    assert environment["SEEKDB_PATH"] == environment["SEEKDB_EMBED_DIR"] == str(embed_dir)
+    assert environment["SEEKDB_DB_NAME"] == environment["OCEANBASE_DB_NAME"] == "test"
+
+
+@pytest.mark.parametrize("template", ["deepagents/mcp", "langchain/agentic-rag-hybrid"])
+def test_other_profiles_keep_seekdb_and_api_databases_isolated(
+    tmp_path: Path,
+    template: str,
+) -> None:
+    embed_dir = (tmp_path / "sdb").resolve()
+    environment = smoke._child_environment(
+        {},
+        smoke.PROFILES[template],
+        tmp_path,
+        provider_port=43125,
+        backend_port=2024,
+        runtime_environment={
+            "SEEKDB_EMBED": "true",
+            "SEEKDB_EMBED_DIR": str(embed_dir),
+        },
+    )
+
+    assert environment["SEEKDB_PATH"] == str((tmp_path / "databases" / "rag-seekdb").resolve())
+    assert environment["SEEKDB_DB_NAME"].startswith("smoke_seekdb_")
+    assert environment["OCEANBASE_DB_NAME"].startswith("smoke_api_")
+    assert environment["SEEKDB_DB_NAME"] != environment["OCEANBASE_DB_NAME"]
 
 
 def test_proof_runtime_record_accepts_distinct_allocated_ports() -> None:
