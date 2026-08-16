@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import zipfile
 from pathlib import Path
 
@@ -323,6 +324,84 @@ def test_process_cleanup_attempts_provider_after_lifecycle_error(monkeypatch: py
         smoke._terminate_processes(lifecycle, provider)
 
     assert attempted == [lifecycle, provider]
+
+
+def test_runtime_startup_error_remains_primary_when_exited_windows_leader_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    system_root = tmp_path / "Windows"
+    taskkill = system_root / "System32" / "taskkill.exe"
+    taskkill.parent.mkdir(parents=True)
+    taskkill.touch()
+    environment = {"SystemRoot": str(system_root)}
+    process = _Process(returncode=1)
+
+    def terminate(process_to_stop: _Process, **kwargs: object) -> None:
+        smoke._terminate_windows_process(
+            process_to_stop,
+            kwargs["cleanup_environment"],  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(smoke, "_terminate", terminate)
+    startup_error = RuntimeError("runtime startup failed")
+
+    with pytest.raises(RuntimeError) as exc_info, smoke._managed_runtime_processes(environment) as resources:
+        resources.lifecycle = process
+        raise startup_error
+
+    assert exc_info.value is startup_error
+    assert startup_error.args == ("runtime startup failed",)
+    assert str(startup_error) == "runtime startup failed"
+    assert traceback.extract_tb(startup_error.__traceback__)[-1].name == (
+        "test_runtime_startup_error_remains_primary_when_exited_windows_leader_cleanup_fails"
+    )
+    assert startup_error.__notes__ == [smoke.SECONDARY_CLEANUP_NOTE]
+
+
+def test_exited_windows_leader_cleanup_failure_blocks_success(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    system_root = tmp_path / "Windows"
+    taskkill = system_root / "System32" / "taskkill.exe"
+    taskkill.parent.mkdir(parents=True)
+    taskkill.touch()
+    environment = {"SystemRoot": str(system_root)}
+    process = _Process(returncode=1)
+
+    def terminate(process_to_stop: _Process, **kwargs: object) -> None:
+        smoke._terminate_windows_process(
+            process_to_stop,
+            kwargs["cleanup_environment"],  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(smoke, "_terminate", terminate)
+
+    with (
+        pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR),
+        smoke._managed_runtime_processes(environment) as resources,
+    ):
+        resources.lifecycle = process
+
+
+def test_runtime_error_is_not_masked_by_stream_close_failure() -> None:
+    class FailingStream:
+        def close(self) -> None:
+            raise RuntimeError("stream close failed")
+
+    startup_error = RuntimeError("runtime startup failed")
+
+    with pytest.raises(RuntimeError) as exc_info, smoke._managed_runtime_processes({}) as resources:
+        resources.lifecycle_stream = FailingStream()
+        raise startup_error
+
+    assert exc_info.value is startup_error
+    assert str(startup_error) == "runtime startup failed"
+    assert traceback.extract_tb(startup_error.__traceback__)[-1].name == (
+        "test_runtime_error_is_not_masked_by_stream_close_failure"
+    )
+    assert startup_error.__notes__ == [smoke.SECONDARY_CLEANUP_NOTE]
 
 
 def test_read_log_redacts_process_environment_and_argv(tmp_path: Path) -> None:
@@ -718,6 +797,80 @@ def test_frontend_install_is_absent_for_cli_remote(tmp_path: Path) -> None:
     generated = tmp_path / "generated"
     generated.mkdir()
     assert smoke.build_frontend_install_command(generated, Path("/usr/bin/npm")) is None
+
+
+@pytest.mark.parametrize(
+    "outer_python",
+    [
+        "/opt/hostedtoolcache/Python/3.12.13/x64/bin/python",
+        r"C:\hostedtoolcache\windows\Python\3.12.10\x64\python.exe",
+    ],
+)
+def test_generated_sync_uses_the_exact_outer_python(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    outer_python: str,
+) -> None:
+    run_root = tmp_path / "run"
+    generated = run_root / "rendered" / "project"
+    generated.mkdir(parents=True)
+    artifact_path = run_root / "artifacts" / "agentseek_api-0.2.2-py3-none-any.whl"
+    artifact_path.parent.mkdir()
+    artifact_path.write_bytes(b"wheel")
+    artifact = smoke.WheelArtifact(
+        name="agentseek-api",
+        version="0.2.2",
+        filename=artifact_path.name,
+        path=artifact_path,
+        sha256="a" * 64,
+        url="https://files.pythonhosted.org/agentseek_api-0.2.2-py3-none-any.whl",
+    )
+    toolchain = smoke.Toolchain(
+        uv=Path("/toolchain/uv"),
+        git=Path("/toolchain/git"),
+        node=Path("/toolchain/node"),
+        npm=Path("/toolchain/npm"),
+        sh=None,
+    )
+    calls: list[dict[str, object]] = []
+
+    def run_checked(command: list[str], **kwargs: object) -> smoke.subprocess.CompletedProcess[str]:
+        calls.append({"command": command, **kwargs})
+        return smoke.subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(smoke.sys, "executable", outer_python)
+    monkeypatch.setattr(smoke, "_run_checked", run_checked)
+
+    smoke._install_generated_project(
+        generated,
+        artifact,
+        toolchain,
+        {},
+        "langchain/cli-remote",
+        run_root,
+    )
+
+    assert calls == [
+        {
+            "command": [
+                str(toolchain.uv),
+                "sync",
+                "--python",
+                outer_python,
+                "--no-cache",
+                "--no-config",
+                "--default-index",
+                smoke.PYPI_INDEX,
+                "--find-links",
+                str(artifact_path.parent.resolve()),
+            ],
+            "cwd": generated,
+            "env": {},
+            "label": "langchain/cli-remote: install generated Python environment",
+            "run_root": run_root,
+            "timeout": smoke.DEPENDENCY_INSTALL_TIMEOUT_SECONDS,
+        }
+    ]
 
 
 def test_windows_runtime_uses_sqlite_without_embedded_seekdb(tmp_path: Path) -> None:

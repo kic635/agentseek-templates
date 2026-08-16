@@ -22,7 +22,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from email import policy
 from email.parser import BytesParser
 from pathlib import Path
@@ -44,6 +44,7 @@ LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS = 45
 FORCE_SHUTDOWN_TIMEOUT_SECONDS = 10
 WINDOWS_TASKKILL_TIMEOUT_SECONDS = 10
 WINDOWS_TREE_CLEANUP_ERROR = "Windows process tree cleanup could not be verified"
+SECONDARY_CLEANUP_NOTE = "Secondary cleanup failure: runtime process cleanup could not be verified"
 PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
 COMMAND_OUTPUT_TAIL_BYTES = 12_000
 COMMAND_OUTPUT_DRAIN_TIMEOUT_SECONDS = 5
@@ -192,6 +193,14 @@ class PortPlan(NamedTuple):
     def release(self) -> None:
         for reservation in self.reservations:
             reservation.close()
+
+
+class RuntimeProcesses:
+    def __init__(self) -> None:
+        self.provider: subprocess.Popen[bytes] | None = None
+        self.lifecycle: subprocess.Popen[bytes] | None = None
+        self.provider_stream: object | None = None
+        self.lifecycle_stream: object | None = None
 
 
 def build_create_command(
@@ -937,6 +946,8 @@ def _install_generated_project(
         [
             str(toolchain.uv),
             "sync",
+            "--python",
+            sys.executable,
             "--no-cache",
             "--no-config",
             "--default-index",
@@ -1384,6 +1395,51 @@ def _terminate_processes(
         raise first_error
 
 
+def _cleanup_runtime_processes(
+    resources: RuntimeProcesses,
+    cleanup_environment: Mapping[str, str],
+    primary_error: BaseException | None,
+) -> None:
+    first_error: BaseException | None = None
+    try:
+        _terminate_processes(
+            resources.lifecycle,
+            resources.provider,
+            cleanup_environment=cleanup_environment,
+        )
+    except BaseException as exc:
+        first_error = exc
+    for stream in (resources.lifecycle_stream, resources.provider_stream):
+        if stream is None:
+            continue
+        try:
+            stream.close()  # type: ignore[attr-defined]
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is None:
+        return
+    if primary_error is not None:
+        primary_error.add_note(SECONDARY_CLEANUP_NOTE)
+        return
+    raise first_error
+
+
+@contextlib.contextmanager
+def _managed_runtime_processes(
+    cleanup_environment: Mapping[str, str],
+) -> Iterator[RuntimeProcesses]:
+    resources = RuntimeProcesses()
+    primary_error: BaseException | None = None
+    try:
+        yield resources
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        _cleanup_runtime_processes(resources, cleanup_environment, primary_error)
+
+
 def _run_graph(
     base_url: str,
     *,
@@ -1655,11 +1711,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         log_dir = run_root / "logs"
         log_dir.mkdir(mode=0o700)
         port_plan.release()
-        provider: subprocess.Popen[bytes] | None = None
-        lifecycle: subprocess.Popen[bytes] | None = None
-        provider_stream: object | None = None
-        lifecycle_stream: object | None = None
-        try:
+        with _managed_runtime_processes(launcher_environment) as runtime_processes:
             provider, provider_stream = _start_process(
                 [
                     str(launcher_python),
@@ -1673,12 +1725,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 env=child_environment,
                 log_path=log_dir / "fake-provider.log",
             )
+            runtime_processes.provider = provider
+            runtime_processes.provider_stream = provider_stream
             lifecycle, lifecycle_stream = _start_process(
                 [str(agentseek_executable), "dev", "--skip-check"],
                 cwd=generated,
                 env=child_environment,
                 log_path=log_dir / "agentseek-dev.log",
             )
+            runtime_processes.lifecycle = lifecycle
+            runtime_processes.lifecycle_stream = lifecycle_stream
             base_url = f"http://127.0.0.1:{port_plan.backend_port}"
             _wait_for_runtime(
                 base_url,
@@ -1697,20 +1753,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 graph_id=profile.graph_id,
                 run_input=profile.run_input,
             )
-        finally:
-            try:
-                _terminate_processes(
-                    lifecycle,
-                    provider,
-                    cleanup_environment=launcher_environment,
-                )
-            finally:
-                try:
-                    if lifecycle_stream is not None:
-                        lifecycle_stream.close()  # type: ignore[attr-defined]
-                finally:
-                    if provider_stream is not None:
-                        provider_stream.close()  # type: ignore[attr-defined]
     finally:
         port_plan.release()
 
