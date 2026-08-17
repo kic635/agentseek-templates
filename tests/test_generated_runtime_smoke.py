@@ -29,6 +29,16 @@ fake_provider = importlib.util.module_from_spec(FAKE_PROVIDER_SPEC)
 FAKE_PROVIDER_SPEC.loader.exec_module(fake_provider)
 
 
+def _load_windows_job_wrapper():
+    script = SCRIPT.with_name("windows_job_wrapper.py")
+    assert script.is_file()
+    spec = importlib.util.spec_from_file_location("windows_job_wrapper", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -282,6 +292,194 @@ def test_windows_cleanup_fails_closed_when_leader_already_exited(tmp_path: Path)
         smoke._terminate_windows_process(process, {"SystemRoot": str(system_root)})
 
 
+def test_windows_cleanup_accepts_exited_owned_wrapper_with_empty_job_marker(
+    tmp_path: Path,
+) -> None:
+    process = _Process(returncode=0)
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    marker = tmp_path / "owned-tree-empty.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "nonce": nonce,
+                "owner_pid": process.pid,
+                "schema_version": 1,
+                "status": "empty",
+            }
+        ),
+        encoding="utf-8",
+    )
+    process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = nonce  # type: ignore[attr-defined]
+
+    smoke._terminate_windows_process(process, {})
+
+    assert process.poll_calls == 1
+    assert process.kill_calls == 0
+    assert process.wait_calls == 0
+
+
+def test_windows_cleanup_rejects_exited_wrapper_marker_with_wrong_nonce(
+    tmp_path: Path,
+) -> None:
+    process = _Process(returncode=0)
+    marker = tmp_path / "owned-tree-empty.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "nonce": "marker-nonce",
+                "owner_pid": process.pid,
+                "schema_version": 1,
+                "status": "empty",
+            }
+        ),
+        encoding="utf-8",
+    )
+    process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = "parent-nonce"  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
+        smoke._terminate_windows_process(process, {})
+
+
+def test_windows_cleanup_rejects_matching_noncryptographic_marker_nonce(
+    tmp_path: Path,
+) -> None:
+    process = _Process(returncode=0)
+    nonce = "forged"
+    marker = tmp_path / "owned-tree-empty.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "nonce": nonce,
+                "owner_pid": process.pid,
+                "schema_version": 1,
+                "status": "empty",
+            }
+        ),
+        encoding="utf-8",
+    )
+    process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = nonce  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
+        smoke._terminate_windows_process(process, {})
+
+
+def test_windows_job_wrapper_marks_empty_tree_after_nonzero_child_exit(
+    tmp_path: Path,
+) -> None:
+    wrapper = _load_windows_job_wrapper()
+    marker = tmp_path / "owned-tree-empty.json"
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    events: list[object] = []
+
+    class Child:
+        def wait(self) -> int:
+            events.append("wait")
+            return 17
+
+        def close_remaining_tree(self, *, timeout: float) -> None:
+            events.append(("close-remaining-tree", timeout))
+
+        def ensure_closed(self, *, timeout: float) -> None:
+            events.append(("ensure-closed", timeout))
+
+        def terminate_and_reap(self, *, timeout: float) -> None:
+            events.append(("terminate-and-reap", timeout))
+
+        def close(self) -> None:
+            events.append("close")
+
+    class Supervisor:
+        @staticmethod
+        def start(command: list[str], *, env: dict[str, str], cwd: str):
+            events.append(("start", command, env, cwd))
+            return Child()
+
+    exit_code = wrapper.run_owned_command(
+        [r"C:\runtime\child.exe", "--serve"],
+        marker=marker,
+        nonce=nonce,
+        environment={"SAFE": "1"},
+        cwd=r"C:\runtime",
+        supervisor_type=Supervisor,
+        owner_pid=4321,
+    )
+
+    assert exit_code == 17
+    assert events == [
+        (
+            "start",
+            [r"C:\runtime\child.exe", "--serve"],
+            {"SAFE": "1"},
+            r"C:\runtime",
+        ),
+        "wait",
+        ("close-remaining-tree", wrapper.JOB_CLEANUP_TIMEOUT_SECONDS),
+        ("ensure-closed", wrapper.JOB_CLEANUP_TIMEOUT_SECONDS),
+        "close",
+    ]
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "nonce": nonce,
+        "owner_pid": 4321,
+        "schema_version": 1,
+        "status": "empty",
+    }
+    if os.name != "nt":
+        assert marker.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    ["close_remaining_tree", "ensure_closed", "close"],
+)
+def test_windows_job_wrapper_withholds_marker_when_job_emptiness_is_unknown(
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    wrapper = _load_windows_job_wrapper()
+    marker = tmp_path / "owned-tree-empty.json"
+
+    class Child:
+        def wait(self) -> int:
+            return 0
+
+        def close_remaining_tree(self, *, timeout: float) -> None:
+            if failure_stage == "close_remaining_tree":
+                raise RuntimeError(f"close_remaining_tree failed after {timeout}")
+
+        def ensure_closed(self, *, timeout: float) -> None:
+            if failure_stage == "ensure_closed":
+                raise RuntimeError(f"ensure_closed failed after {timeout}")
+
+        def terminate_and_reap(self, *, timeout: float) -> None:
+            del timeout
+
+        def close(self) -> None:
+            if failure_stage == "close":
+                raise RuntimeError("close failed")
+
+    class Supervisor:
+        @staticmethod
+        def start(command: list[str], *, env: dict[str, str], cwd: str):
+            del command, env, cwd
+            return Child()
+
+    with pytest.raises(RuntimeError, match=failure_stage):
+        wrapper.run_owned_command(
+            ["child"],
+            marker=marker,
+            nonce="8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb",
+            environment={},
+            cwd=r"C:\runtime",
+            supervisor_type=Supervisor,
+            owner_pid=4321,
+        )
+
+    assert not marker.exists()
+
+
 @pytest.mark.parametrize("taskkill_result", [1, subprocess.TimeoutExpired("taskkill", 1)])
 def test_windows_cleanup_fails_closed_when_taskkill_cannot_prove_tree_exit(
     monkeypatch: pytest.MonkeyPatch,
@@ -435,6 +633,80 @@ print(sys.argv[1])
     for secret in (proxy, "alice", "real-secret", "abc", "argv-secret"):
         assert secret not in diagnostic
     assert len(diagnostic) <= smoke.COMMAND_OUTPUT_TAIL_BYTES
+
+
+def test_windows_start_process_uses_private_job_wrapper_without_child_nonce_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    supervisor_python = tmp_path / "child" / "Scripts" / "python.exe"
+    supervisor_python.parent.mkdir(parents=True)
+    supervisor_python.touch()
+    log_path = tmp_path / "run" / "logs" / "runtime.log"
+    log_path.parent.mkdir(parents=True)
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    marker = log_path.with_name(f".{log_path.name}.{nonce}.tree-empty.json")
+    child_command = [r"C:\runtime\agentseek.exe", "dev", "--skip-check"]
+    child_environment = {"SAFE": "1"}
+    recorded: dict[str, object] = {}
+
+    class SecretSource:
+        @staticmethod
+        def token_hex(size: int) -> str:
+            assert size == 32
+            return nonce
+
+    class Process:
+        pid = 4321
+
+        def __init__(self, args: list[str]) -> None:
+            self.args = args
+
+    def popen(command: list[str], **kwargs: object) -> Process:
+        assert not marker.exists()
+        recorded.update(command=command, **kwargs)
+        return Process(command)
+
+    monkeypatch.setattr(smoke, "secrets", SecretSource, raising=False)
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(smoke.subprocess, "Popen", popen)
+
+    process, stream = smoke._start_process(
+        child_command,
+        cwd=tmp_path,
+        env=child_environment,
+        log_path=log_path,
+        windows_supervisor_python=supervisor_python,
+    )
+    stream.close()
+    log_path.write_text(f"nonce={nonce}\nmarker={marker}\n", encoding="utf-8")
+
+    assert recorded["command"] == [
+        str(supervisor_python.absolute()),
+        str(smoke.WINDOWS_JOB_WRAPPER),
+        str(marker),
+        nonce,
+        *child_command,
+    ]
+    assert recorded["env"] == child_environment
+    assert recorded["creationflags"] == 0x200
+    assert recorded["start_new_session"] is False
+    assert nonce not in child_command
+    assert nonce not in child_environment.values()
+    assert marker.parent == log_path.parent
+    assert not marker.exists()
+    assert process._agentseek_windows_empty_tree_marker == str(marker)  # type: ignore[attr-defined]
+    assert process._agentseek_windows_empty_tree_nonce == nonce  # type: ignore[attr-defined]
+    assert process._agentseek_diagnostic_environment == {  # type: ignore[attr-defined]
+        "AGENTSEEK_WINDOWS_JOB_MARKER": str(marker),
+        "AGENTSEEK_WINDOWS_JOB_NONCE": nonce,
+    }
+    monkeypatch.setattr(smoke.os, "name", "posix")
+    diagnostic = smoke._read_log(process)  # type: ignore[arg-type]
+    assert "<redacted>" in diagnostic
+    assert nonce not in diagnostic
+    assert str(marker) not in diagnostic
 
 
 def test_read_log_reads_only_a_bounded_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

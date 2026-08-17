@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -38,12 +39,15 @@ from scripts import runtime_proof  # noqa: E402
 from scripts.runtime_proof import ImportRecord, WheelArtifact  # noqa: E402
 
 FAKE_PROVIDER = ROOT / "scripts" / "fake_openai_server.py"
+WINDOWS_JOB_WRAPPER = ROOT / "scripts" / "windows_job_wrapper.py"
 PYPI_INDEX = "https://pypi.org/simple"
 PROBE_GRAPH_ID = "release_contract_probe"
 LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS = 45
 FORCE_SHUTDOWN_TIMEOUT_SECONDS = 10
 WINDOWS_TASKKILL_TIMEOUT_SECONDS = 10
 WINDOWS_TREE_CLEANUP_ERROR = "Windows process tree cleanup could not be verified"
+WINDOWS_EMPTY_TREE_MARKER_MAX_BYTES = 512
+WINDOWS_EMPTY_TREE_NONCE_PATTERN = re.compile(r"[0-9a-f]{64}")
 SECONDARY_CLEANUP_NOTE = "Secondary cleanup failure: runtime process cleanup could not be verified"
 PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
 COMMAND_OUTPUT_TAIL_BYTES = 12_000
@@ -1195,7 +1199,10 @@ def _read_log(process: subprocess.Popen[bytes]) -> str:
         command = (os.fsdecode(raw_command),)
     else:
         command = tuple(os.fsdecode(item) for item in raw_command)
-    environment = getattr(process, "_agentseek_environment", {})
+    environment = dict(getattr(process, "_agentseek_environment", {}))
+    diagnostic_environment = getattr(process, "_agentseek_diagnostic_environment", {})
+    if isinstance(diagnostic_environment, Mapping):
+        environment.update(diagnostic_environment)
     diagnostic = _bounded_output_tail(path)
     return _redact_diagnostic(diagnostic, command, environment)[-COMMAND_OUTPUT_TAIL_BYTES:]
 
@@ -1245,12 +1252,40 @@ def _start_process(
     cwd: Path,
     env: Mapping[str, str],
     log_path: Path,
+    windows_supervisor_python: Path | None = None,
 ) -> tuple[subprocess.Popen[bytes], object]:
+    launch_command = list(command)
+    marker: Path | None = None
+    nonce: str | None = None
+    if os.name == "nt":
+        if windows_supervisor_python is None:
+            raise RuntimeError("Windows runtime launch requires a Job Object supervisor")
+        supervisor_python = _external_executable(windows_supervisor_python, [ROOT])
+        try:
+            wrapper = WINDOWS_JOB_WRAPPER.resolve(strict=True)
+        except OSError as exc:
+            raise RuntimeError("Windows Job Object wrapper is unavailable") from exc
+        if not wrapper.is_file():
+            raise RuntimeError("Windows Job Object wrapper is invalid")
+        nonce = secrets.token_hex(32)
+        if WINDOWS_EMPTY_TREE_NONCE_PATTERN.fullmatch(nonce) is None:
+            raise RuntimeError("Windows Job Object nonce generation failed")
+        marker = log_path.with_name(f".{log_path.name}.{nonce}.tree-empty.json")
+        if marker.exists() or marker.is_symlink():
+            raise RuntimeError("Windows Job Object marker already exists")
+        launch_command = [
+            str(supervisor_python),
+            str(wrapper),
+            str(marker),
+            nonce,
+            *launch_command,
+        ]
+
     stream = log_path.open("wb")
     creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
     try:
         process = subprocess.Popen(
-            list(command),
+            launch_command,
             cwd=cwd,
             env=dict(env),
             stdout=stream,
@@ -1263,6 +1298,13 @@ def _start_process(
         raise
     process._agentseek_log_path = str(log_path)  # type: ignore[attr-defined]
     process._agentseek_environment = dict(env)  # type: ignore[attr-defined]
+    if marker is not None and nonce is not None:
+        process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
+        process._agentseek_windows_empty_tree_nonce = nonce  # type: ignore[attr-defined]
+        process._agentseek_diagnostic_environment = {  # type: ignore[attr-defined]
+            "AGENTSEEK_WINDOWS_JOB_MARKER": str(marker),
+            "AGENTSEEK_WINDOWS_JOB_NONCE": nonce,
+        }
     return process, stream
 
 
@@ -1304,8 +1346,43 @@ def _windows_cleanup_tool(environment: Mapping[str, str]) -> tuple[Path, dict[st
     return taskkill, {selected_name: raw_root}
 
 
+def _windows_empty_tree_marker_proves_empty(process: subprocess.Popen[bytes]) -> bool:
+    raw_path = getattr(process, "_agentseek_windows_empty_tree_marker", None)
+    expected_nonce = getattr(process, "_agentseek_windows_empty_tree_nonce", None)
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or not isinstance(expected_nonce, str)
+        or WINDOWS_EMPTY_TREE_NONCE_PATTERN.fullmatch(expected_nonce) is None
+    ):
+        return False
+    path = Path(raw_path)
+    try:
+        if not path.is_absolute() or path.is_symlink() or not path.is_file():
+            return False
+        with path.open("rb") as stream:
+            raw = stream.read(WINDOWS_EMPTY_TREE_MARKER_MAX_BYTES + 1)
+        if len(raw) > WINDOWS_EMPTY_TREE_MARKER_MAX_BYTES:
+            return False
+        payload = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and set(payload) == {"nonce", "owner_pid", "schema_version", "status"}
+        and payload["nonce"] == expected_nonce
+        and type(payload["owner_pid"]) is int
+        and payload["owner_pid"] == process.pid
+        and type(payload["schema_version"]) is int
+        and payload["schema_version"] == 1
+        and payload["status"] == "empty"
+    )
+
+
 def _terminate_windows_process(process: subprocess.Popen[bytes], environment: Mapping[str, str]) -> None:
     if process.poll() is not None:
+        if _windows_empty_tree_marker_proves_empty(process):
+            return
         raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
     try:
         taskkill, cleanup_environment = _windows_cleanup_tool(environment)
@@ -1724,6 +1801,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cwd=generated,
                 env=child_environment,
                 log_path=log_dir / "fake-provider.log",
+                windows_supervisor_python=child_python,
             )
             runtime_processes.provider = provider
             runtime_processes.provider_stream = provider_stream
@@ -1732,6 +1810,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cwd=generated,
                 env=child_environment,
                 log_path=log_dir / "agentseek-dev.log",
+                windows_supervisor_python=child_python,
             )
             runtime_processes.lifecycle = lifecycle
             runtime_processes.lifecycle_stream = lifecycle_stream
