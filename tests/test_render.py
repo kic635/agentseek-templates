@@ -55,6 +55,7 @@ EXPECTED_CORE_DEPENDENCIES = {
     "deepagents/default": {"agentseek-ag-ui", "agentseek-langchain"},
     "deepagents/mcp": set(),
     "deepagents/research": set(),
+    "deepagents/streaming": set(),
     "deepagents/sandbox": set(),
     "langchain/agentic-rag": set(),
     "langchain/agentic-rag-hybrid": set(),
@@ -145,6 +146,30 @@ EXPECTED_NORMALIZED_TOPOLOGY = {
         ),
     },
     "deepagents/research": {
+        "services": (
+            ("frontend", "web", "default", True, ("process:frontend",), ("frontend",), ("docs",)),
+            (
+                "langgraph",
+                "api",
+                "advanced",
+                False,
+                ("process:langgraph",),
+                ("langgraph",),
+                ("api_docs", "docs", "studio"),
+            ),
+        ),
+        "effects": {},
+        "actions": (
+            "project:start_dev",
+            "service:frontend:open",
+            "service:frontend:reference:docs",
+            "service:langgraph:copy",
+            "service:langgraph:reference:api_docs",
+            "service:langgraph:reference:docs",
+            "service:langgraph:reference:studio",
+        ),
+    },
+    "deepagents/streaming": {
         "services": (
             ("frontend", "web", "default", True, ("process:frontend",), ("frontend",), ("docs",)),
             (
@@ -1472,3 +1497,57 @@ def test_runtime_floor_smoke_uses_public_main_app_import() -> None:
     script = (REPOSITORY_ROOT / "scripts" / "runtime_floor_smoke.py").read_text(encoding="utf-8")
     assert "from agentseek_api.main import app" in script
     assert "from agentseek_api.cli import app" not in script
+
+
+def test_deepagents_streaming_template_keeps_langgraph_v3_contract(tmp_path: Path) -> None:
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    generated_path = _render(TEMPLATES_ROOT / "deepagents/streaming", output_root, tmp_path)
+
+    pyproject = tomllib.loads((generated_path / "pyproject.toml").read_text(encoding="utf-8"))
+    dependencies = set(pyproject["project"]["dependencies"])
+    assert "langgraph-cli[inmem]>=0.4" in dependencies
+    assert "deepagents==0.6.12" in dependencies
+    assert not any(dependency.startswith("agentseek-api") for dependency in dependencies)
+
+    graph_config = json.loads((generated_path / "langgraph.json").read_text(encoding="utf-8"))
+    assert graph_config["dependencies"] == ["."]
+    assert graph_config["graphs"]["streaming"].endswith(".agent:graph")
+    assert graph_config["http"]["app"].endswith(".routes:app")
+
+    env_example = (generated_path / ".env.example").read_text(encoding="utf-8")
+    assert "SEEKDB_" not in env_example
+    assert "OCEANBASE_DB_NAME" not in env_example
+
+    route_source = next((generated_path / "src").glob("*/routes.py")).read_text(encoding="utf-8")
+    adapter_source = next((generated_path / "src").glob("*/event_adapter.py")).read_text(encoding="utf-8")
+    frontend_source = (generated_path / "frontend/src/EventTimeline.tsx").read_text(encoding="utf-8")
+    generated_readme = (generated_path / "README.md").read_text(encoding="utf-8")
+    assert "agentseek-api" not in generated_readme
+    assert "agentseek task" not in generated_readme
+    assert "uv run langgraph dev" in generated_readme
+    for projection in ("subagents", "messages", "tool_calls", "values", "output"):
+        assert projection in route_source
+    assert 'version="v3"' in route_source
+    assert "astream_events(" in route_source
+    assert "stream_events(" not in route_source.replace("astream_events(", "")
+    assert "while callable(value)" in route_source
+    assert 'phase="failed"' in route_source
+
+    lifecycle = tomllib.loads((generated_path / ".agentseek/lifecycle.toml").read_text(encoding="utf-8"))
+    assert lifecycle["services"]["langgraph"]["tech"] == "langgraph"
+    assert lifecycle["processes"]["langgraph"]["command"] == [
+        "uv",
+        "run",
+        "langgraph",
+        "dev",
+        "--port",
+        "2024",
+        "--no-browser",
+    ]
+    assert lifecycle["checks"]["langgraph"]["target"] == "http://127.0.0.1:2024"
+    assert "astream_events" in generated_readme
+    assert 'version="v3"' in generated_readme
+    for event_kind in ("message", "subagent", "tool_call", "values", "output", "raw", "error"):
+        assert f'"kind": "{event_kind}"' in adapter_source
+    assert "state snapshot" in frontend_source
