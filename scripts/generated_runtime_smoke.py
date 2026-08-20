@@ -48,6 +48,7 @@ WINDOWS_TASKKILL_TIMEOUT_SECONDS = 10
 WINDOWS_TREE_CLEANUP_ERROR = "Windows process tree cleanup could not be verified"
 WINDOWS_EMPTY_TREE_MARKER_MAX_BYTES = 512
 WINDOWS_EMPTY_TREE_NONCE_PATTERN = re.compile(r"[0-9a-f]{64}")
+WINDOWS_CLEANUP_REQUEST_PAYLOAD = b"cleanup\n"
 SECONDARY_CLEANUP_NOTE = "Secondary cleanup failure: runtime process cleanup could not be verified"
 PROCESS_GROUP_POLL_INTERVAL_SECONDS = 0.05
 COMMAND_OUTPUT_TAIL_BYTES = 12_000
@@ -1417,6 +1418,29 @@ def _is_windows_job_wrapper(process: subprocess.Popen[bytes]) -> bool:
     )
 
 
+def _windows_cleanup_request_path(marker: Path) -> Path:
+    return marker.with_name(f"{marker.name}.cleanup-request")
+
+
+def _write_windows_cleanup_request(process: subprocess.Popen[bytes]) -> None:
+    marker_value = getattr(process, "_agentseek_windows_empty_tree_marker", None)
+    if not isinstance(marker_value, str):
+        raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
+    marker = Path(marker_value)
+    request = _windows_cleanup_request_path(marker)
+    try:
+        with request.open("xb") as stream:
+            stream.write(WINDOWS_CLEANUP_REQUEST_PAYLOAD)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError:
+        # A pre-existing request can only stop the owned Job early. It cannot
+        # forge the nonce-bearing empty-tree marker, so continue fail-closed.
+        pass
+    except OSError as exc:
+        raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from exc
+
+
 def _force_windows_wrapper_exit(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is None:
         with contextlib.suppress(OSError):
@@ -1427,14 +1451,14 @@ def _force_windows_wrapper_exit(process: subprocess.Popen[bytes]) -> None:
 
 def _terminate_windows_job_wrapper(process: subprocess.Popen[bytes]) -> None:
     try:
-        process.send_signal(signal.CTRL_BREAK_EVENT)
-    except (AttributeError, OSError, ValueError):
+        _write_windows_cleanup_request(process)
+    except RuntimeError:
         _force_windows_wrapper_exit(process)
-    else:
-        try:
-            process.wait(timeout=LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS)
-        except (OSError, subprocess.TimeoutExpired):
-            _force_windows_wrapper_exit(process)
+        raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from None
+    try:
+        process.wait(timeout=LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS)
+    except (OSError, subprocess.TimeoutExpired):
+        _force_windows_wrapper_exit(process)
     if _windows_empty_tree_marker_proves_empty(process):
         return
     raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
