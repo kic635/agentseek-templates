@@ -1450,18 +1450,30 @@ def _force_windows_wrapper_exit(process: subprocess.Popen[bytes]) -> None:
 
 
 def _terminate_windows_job_wrapper(process: subprocess.Popen[bytes]) -> None:
+    marker_value = getattr(process, "_agentseek_windows_empty_tree_marker", None)
+    request = _windows_cleanup_request_path(Path(marker_value)) if isinstance(marker_value, str) else None
     try:
         _write_windows_cleanup_request(process)
     except RuntimeError:
         _force_windows_wrapper_exit(process)
         raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from None
+    wait_outcome = "wrapper-exited"
     try:
         process.wait(timeout=LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS)
-    except (OSError, subprocess.TimeoutExpired):
+    except subprocess.TimeoutExpired:
+        wait_outcome = "wrapper-timeout"
+        _force_windows_wrapper_exit(process)
+    except OSError:
+        wait_outcome = "wrapper-wait-error"
         _force_windows_wrapper_exit(process)
     if _windows_empty_tree_marker_proves_empty(process):
         return
-    raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
+    request_outcome = (
+        "request-pending" if request is not None and (request.exists() or request.is_symlink()) else "request-consumed"
+    )
+    error = RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
+    error.add_note(f"Windows cleanup diagnostic: {request_outcome}, {wait_outcome}.")
+    raise error
 
 
 def _terminate_windows_process(process: subprocess.Popen[bytes], environment: Mapping[str, str]) -> None:

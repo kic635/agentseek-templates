@@ -429,7 +429,7 @@ def test_windows_cleanup_fails_closed_when_owned_wrapper_cannot_confirm_shutdown
 
     process.wait = wait  # type: ignore[method-assign]
 
-    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR) as captured:
         smoke._terminate_windows_process(process, {})
 
     assert process.kill_calls == 1
@@ -437,6 +437,7 @@ def test_windows_cleanup_fails_closed_when_owned_wrapper_cannot_confirm_shutdown
         smoke.LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS,
         smoke.FORCE_SHUTDOWN_TIMEOUT_SECONDS,
     ]
+    assert captured.value.__notes__ == ["Windows cleanup diagnostic: request-pending, wrapper-timeout."]
 
 
 def test_windows_job_wrapper_request_interrupts_wait_and_empties_job(
