@@ -1267,17 +1267,17 @@ def _start_process(
             raise RuntimeError("Windows Job Object wrapper is unavailable") from exc
         if not wrapper.is_file():
             raise RuntimeError("Windows Job Object wrapper is invalid")
+        marker_id = secrets.token_hex(16)
         nonce = secrets.token_hex(32)
         if WINDOWS_EMPTY_TREE_NONCE_PATTERN.fullmatch(nonce) is None:
             raise RuntimeError("Windows Job Object nonce generation failed")
-        marker = log_path.with_name(f".{log_path.name}.{nonce}.tree-empty.json")
+        marker = log_path.with_name(f".{log_path.name}.{marker_id}.tree-empty.json")
         if marker.exists() or marker.is_symlink():
             raise RuntimeError("Windows Job Object marker already exists")
         launch_command = [
             str(supervisor_python),
             str(wrapper),
             str(marker),
-            nonce,
             *launch_command,
         ]
 
@@ -1288,6 +1288,7 @@ def _start_process(
             launch_command,
             cwd=cwd,
             env=dict(env),
+            stdin=subprocess.PIPE if os.name == "nt" else None,
             stdout=stream,
             stderr=subprocess.STDOUT,
             start_new_session=os.name != "nt",
@@ -1296,6 +1297,36 @@ def _start_process(
     except BaseException:
         stream.close()
         raise
+    if marker is not None and nonce is not None:
+        nonce_payload = f"{nonce}\n".encode("ascii")
+        try:
+            if process.stdin is None or process.stdin.write(nonce_payload) != len(nonce_payload):
+                raise OSError("Windows Job Object nonce write was incomplete")
+            process.stdin.flush()
+            process.stdin.close()
+        except BaseException as exc:
+            cleanup_failed = False
+            if process.stdin is not None:
+                try:
+                    process.stdin.close()
+                except BaseException:
+                    cleanup_failed = True
+            try:
+                process.kill()
+            except OSError:
+                cleanup_failed = True
+            try:
+                process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                cleanup_failed = True
+            try:
+                stream.close()
+            except BaseException:
+                cleanup_failed = True
+            handoff_error = RuntimeError("Windows Job Object nonce handoff failed")
+            if cleanup_failed:
+                handoff_error.add_note(SECONDARY_CLEANUP_NOTE)
+            raise handoff_error from exc
     process._agentseek_log_path = str(log_path)  # type: ignore[attr-defined]
     process._agentseek_environment = dict(env)  # type: ignore[attr-defined]
     if marker is not None and nonce is not None:

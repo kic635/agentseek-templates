@@ -7,13 +7,15 @@ import contextlib
 import json
 import os
 import re
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Protocol
+from typing import BinaryIO, Protocol
 
 JOB_CLEANUP_TIMEOUT_SECONDS = 10.0
 EMPTY_TREE_MARKER_SCHEMA_VERSION = 1
 NONCE_PATTERN = re.compile(r"[0-9a-f]{64}")
+NONCE_PAYLOAD_BYTES = 65
 
 
 class _OwnedChild(Protocol):
@@ -80,11 +82,27 @@ def _write_empty_tree_marker(marker: Path, *, nonce: str, owner_pid: int) -> Non
         raise
 
 
+def _read_nonce(stream: BinaryIO) -> str:
+    try:
+        payload = stream.read(NONCE_PAYLOAD_BYTES + 1)
+    except BaseException as exc:
+        raise RuntimeError("Windows Job Object nonce input is unavailable") from exc
+    if not isinstance(payload, bytes) or len(payload) != NONCE_PAYLOAD_BYTES or payload[-1:] != b"\n":
+        raise RuntimeError("Windows Job Object nonce input is invalid")
+    try:
+        nonce = payload[:-1].decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("Windows Job Object nonce input is invalid") from exc
+    if NONCE_PATTERN.fullmatch(nonce) is None:
+        raise RuntimeError("Windows Job Object nonce input is invalid")
+    return nonce
+
+
 def run_owned_command(
     command: Sequence[str],
     *,
     marker: Path,
-    nonce: str,
+    nonce_stream: BinaryIO,
     environment: Mapping[str, str],
     cwd: str,
     supervisor_type: _SupervisorType,
@@ -92,10 +110,9 @@ def run_owned_command(
 ) -> int:
     if not command or not all(isinstance(item, str) and item for item in command):
         raise RuntimeError("Windows Job Object wrapper received an invalid command")
-    if NONCE_PATTERN.fullmatch(nonce) is None:
-        raise RuntimeError("Windows Job Object wrapper received an invalid nonce")
     if type(owner_pid) is not int or owner_pid <= 0:
         raise RuntimeError("Windows Job Object wrapper received an invalid owner PID")
+    nonce = _read_nonce(nonce_stream)
 
     child = supervisor_type.start(list(command), env=dict(environment), cwd=cwd)
     failure: BaseException | None = None
@@ -129,7 +146,6 @@ def run_owned_command(
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("marker", type=Path)
-    parser.add_argument("nonce")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if not args.command:
@@ -146,7 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return run_owned_command(
         args.command,
         marker=args.marker,
-        nonce=args.nonce,
+        nonce_stream=sys.stdin.buffer,
         environment=os.environ,
         cwd=os.getcwd(),
         supervisor_type=ForegroundChildSupervisor,

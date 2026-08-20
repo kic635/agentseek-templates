@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -319,15 +320,17 @@ def test_windows_cleanup_accepts_exited_owned_wrapper_with_empty_job_marker(
     assert process.wait_calls == 0
 
 
-def test_windows_cleanup_rejects_exited_wrapper_marker_with_wrong_nonce(
+def test_windows_cleanup_rejects_forged_marker_without_parent_nonce(
     tmp_path: Path,
 ) -> None:
     process = _Process(returncode=0)
+    marker_nonce = "a" * 64
+    parent_nonce = "b" * 64
     marker = tmp_path / "owned-tree-empty.json"
     marker.write_text(
         json.dumps(
             {
-                "nonce": "marker-nonce",
+                "nonce": marker_nonce,
                 "owner_pid": process.pid,
                 "schema_version": 1,
                 "status": "empty",
@@ -336,7 +339,7 @@ def test_windows_cleanup_rejects_exited_wrapper_marker_with_wrong_nonce(
         encoding="utf-8",
     )
     process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
-    process._agentseek_windows_empty_tree_nonce = "parent-nonce"  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = parent_nonce  # type: ignore[attr-defined]
 
     with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
         smoke._terminate_windows_process(process, {})
@@ -372,6 +375,7 @@ def test_windows_job_wrapper_marks_empty_tree_after_nonzero_child_exit(
     wrapper = _load_windows_job_wrapper()
     marker = tmp_path / "owned-tree-empty.json"
     nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    nonce_stream = io.BytesIO(f"{nonce}\n".encode())
     events: list[object] = []
 
     class Child:
@@ -394,13 +398,14 @@ def test_windows_job_wrapper_marks_empty_tree_after_nonzero_child_exit(
     class Supervisor:
         @staticmethod
         def start(command: list[str], *, env: dict[str, str], cwd: str):
+            assert nonce_stream.read(1) == b""
             events.append(("start", command, env, cwd))
             return Child()
 
     exit_code = wrapper.run_owned_command(
         [r"C:\runtime\child.exe", "--serve"],
         marker=marker,
-        nonce=nonce,
+        nonce_stream=nonce_stream,
         environment={"SAFE": "1"},
         cwd=r"C:\runtime",
         supervisor_type=Supervisor,
@@ -470,7 +475,55 @@ def test_windows_job_wrapper_withholds_marker_when_job_emptiness_is_unknown(
         wrapper.run_owned_command(
             ["child"],
             marker=marker,
-            nonce="8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb",
+            nonce_stream=io.BytesIO(b"8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb\n"),
+            environment={},
+            cwd=r"C:\runtime",
+            supervisor_type=Supervisor,
+            owner_pid=4321,
+        )
+
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"",
+        b"a" * 63 + b"\n",
+        b"a" * 64,
+        b"A" * 64 + b"\n",
+        b"g" * 64 + b"\n",
+        b"a" * 32 + b"\n" + b"a" * 32 + b"\n",
+        b"a" * 64 + b"\nextra",
+    ],
+    ids=[
+        "missing",
+        "short",
+        "no-newline",
+        "uppercase",
+        "non-hex",
+        "embedded-newline",
+        "extra",
+    ],
+)
+def test_windows_job_wrapper_rejects_invalid_nonce_input_before_child_spawn(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    wrapper = _load_windows_job_wrapper()
+    marker = tmp_path / "owned-tree-empty.json"
+
+    class Supervisor:
+        @staticmethod
+        def start(command: list[str], *, env: dict[str, str], cwd: str):
+            del command, env, cwd
+            pytest.fail("invalid nonce input must be rejected before child spawn")
+
+    with pytest.raises(RuntimeError, match="nonce input"):
+        wrapper.run_owned_command(
+            ["child"],
+            marker=marker,
+            nonce_stream=io.BytesIO(payload),
             environment={},
             cwd=r"C:\runtime",
             supervisor_type=Supervisor,
@@ -645,22 +698,39 @@ def test_windows_start_process_uses_private_job_wrapper_without_child_nonce_leak
     log_path = tmp_path / "run" / "logs" / "runtime.log"
     log_path.parent.mkdir(parents=True)
     nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
-    marker = log_path.with_name(f".{log_path.name}.{nonce}.tree-empty.json")
+    marker_id = "c5a84da0de9e4561af4c489cad802d63"
+    marker = log_path.with_name(f".{log_path.name}.{marker_id}.tree-empty.json")
     child_command = [r"C:\runtime\agentseek.exe", "dev", "--skip-check"]
     child_environment = {"SAFE": "1"}
     recorded: dict[str, object] = {}
+    nonce_writes: list[object] = []
 
     class SecretSource:
         @staticmethod
         def token_hex(size: int) -> str:
-            assert size == 32
-            return nonce
+            if size == 16:
+                return marker_id
+            if size == 32:
+                return nonce
+            raise AssertionError(f"unexpected token size: {size}")
+
+    class NoncePipe:
+        def write(self, payload: bytes) -> int:
+            nonce_writes.append(("write", payload))
+            return len(payload)
+
+        def flush(self) -> None:
+            nonce_writes.append("flush")
+
+        def close(self) -> None:
+            nonce_writes.append("close")
 
     class Process:
         pid = 4321
 
         def __init__(self, args: list[str]) -> None:
             self.args = args
+            self.stdin = NoncePipe()
 
     def popen(command: list[str], **kwargs: object) -> Process:
         assert not marker.exists()
@@ -686,13 +756,15 @@ def test_windows_start_process_uses_private_job_wrapper_without_child_nonce_leak
         str(supervisor_python.absolute()),
         str(smoke.WINDOWS_JOB_WRAPPER),
         str(marker),
-        nonce,
         *child_command,
     ]
     assert recorded["env"] == child_environment
+    assert recorded["stdin"] == smoke.subprocess.PIPE
     assert recorded["creationflags"] == 0x200
     assert recorded["start_new_session"] is False
-    assert nonce not in child_command
+    assert nonce_writes == [("write", f"{nonce}\n".encode()), "flush", "close"]
+    assert nonce not in recorded["command"]  # type: ignore[operator]
+    assert nonce not in str(marker)
     assert nonce not in child_environment.values()
     assert marker.parent == log_path.parent
     assert not marker.exists()
@@ -707,6 +779,164 @@ def test_windows_start_process_uses_private_job_wrapper_without_child_nonce_leak
     assert "<redacted>" in diagnostic
     assert nonce not in diagnostic
     assert str(marker) not in diagnostic
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "flush", "close"])
+def test_windows_start_process_rolls_back_nonce_handoff_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure_stage: str,
+) -> None:
+    supervisor_python = tmp_path / "child" / "Scripts" / "python.exe"
+    supervisor_python.parent.mkdir(parents=True)
+    supervisor_python.touch()
+    log_path = tmp_path / "run" / "logs" / "runtime.log"
+    log_path.parent.mkdir(parents=True)
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    marker_id = "c5a84da0de9e4561af4c489cad802d63"
+    recorded: dict[str, object] = {}
+
+    class SecretSource:
+        @staticmethod
+        def token_hex(size: int) -> str:
+            return marker_id if size == 16 else nonce
+
+    class NoncePipe:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def write(self, payload: bytes) -> int:
+            if failure_stage == "write":
+                raise OSError("nonce write failed")
+            return len(payload)
+
+        def flush(self) -> None:
+            if failure_stage == "flush":
+                raise OSError("nonce flush failed")
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if failure_stage == "close":
+                raise OSError("nonce close failed")
+
+    class Process:
+        pid = 4321
+
+        def __init__(self, args: list[str]) -> None:
+            self.args = args
+            self.stdin = NoncePipe()
+            self.kill_calls = 0
+            self.wait_timeouts: list[float] = []
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+        def wait(self, *, timeout: float) -> int:
+            self.wait_timeouts.append(timeout)
+            return -9
+
+    process: Process | None = None
+
+    def popen(command: list[str], **kwargs: object) -> Process:
+        nonlocal process
+        recorded.update(command=command, **kwargs)
+        process = Process(command)
+        return process
+
+    monkeypatch.setattr(smoke, "secrets", SecretSource, raising=False)
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(smoke.subprocess, "Popen", popen)
+
+    with pytest.raises(RuntimeError, match="nonce handoff failed"):
+        smoke._start_process(
+            [r"C:\runtime\agentseek.exe", "dev", "--skip-check"],
+            cwd=tmp_path,
+            env={"SAFE": "1"},
+            log_path=log_path,
+            windows_supervisor_python=supervisor_python,
+        )
+
+    monkeypatch.setattr(smoke.os, "name", "posix")
+    assert process is not None
+    assert process.kill_calls == 1
+    assert process.wait_timeouts == [smoke.FORCE_SHUTDOWN_TIMEOUT_SECONDS]
+    assert process.stdin.close_calls >= 1
+    assert not hasattr(process, "_agentseek_windows_empty_tree_nonce")
+    assert not hasattr(process, "_agentseek_windows_empty_tree_marker")
+    assert recorded["stdout"].closed is True  # type: ignore[union-attr]
+    assert nonce not in recorded["command"]  # type: ignore[operator]
+    assert recorded["env"] == {"SAFE": "1"}
+    assert not log_path.with_name(f".{log_path.name}.{marker_id}.tree-empty.json").exists()
+
+
+def test_windows_nonce_handoff_error_remains_primary_when_rollback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    supervisor_python = tmp_path / "child" / "Scripts" / "python.exe"
+    supervisor_python.parent.mkdir(parents=True)
+    supervisor_python.touch()
+    log_path = tmp_path / "run" / "logs" / "runtime.log"
+    log_path.parent.mkdir(parents=True)
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    marker_id = "c5a84da0de9e4561af4c489cad802d63"
+
+    class SecretSource:
+        @staticmethod
+        def token_hex(size: int) -> str:
+            return marker_id if size == 16 else nonce
+
+    class NoncePipe:
+        def write(self, _payload: bytes) -> int:
+            raise OSError("nonce write failed")
+
+        def flush(self) -> None:
+            pytest.fail("flush must not follow a failed write")
+
+        def close(self) -> None:
+            raise OSError("nonce pipe close failed")
+
+    class Process:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.stdin = NoncePipe()
+            self.kill_calls = 0
+            self.wait_calls = 0
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+            raise OSError("wrapper kill failed")
+
+        def wait(self, *, timeout: float) -> int:
+            assert timeout == smoke.FORCE_SHUTDOWN_TIMEOUT_SECONDS
+            self.wait_calls += 1
+            raise subprocess.TimeoutExpired("wrapper", timeout)
+
+    process = Process()
+    monkeypatch.setattr(smoke, "secrets", SecretSource, raising=False)
+    monkeypatch.setattr(smoke.os, "name", "nt")
+    monkeypatch.setattr(smoke.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(smoke.subprocess, "Popen", lambda *_args, **_kwargs: process)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        smoke._start_process(
+            [r"C:\runtime\agentseek.exe", "dev", "--skip-check"],
+            cwd=tmp_path,
+            env={"SAFE": "1"},
+            log_path=log_path,
+            windows_supervisor_python=supervisor_python,
+        )
+
+    error = exc_info.value
+    assert error.args == ("Windows Job Object nonce handoff failed",)
+    assert str(error) == "Windows Job Object nonce handoff failed"
+    assert error.__notes__ == [smoke.SECONDARY_CLEANUP_NOTE]
+    assert isinstance(error.__cause__, OSError)
+    assert str(error.__cause__) == "nonce write failed"
+    assert process.kill_calls == 1
+    assert process.wait_calls == 1
 
 
 def test_read_log_reads_only_a_bounded_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
