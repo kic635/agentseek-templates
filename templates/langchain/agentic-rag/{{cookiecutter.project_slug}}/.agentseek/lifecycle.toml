@@ -5,6 +5,21 @@ description = "LangGraph agentic RAG application with a browser UI and OceanBase
 env_file = ".env"
 guide = "README.md"
 
+[env.SEEKDB_EMBED]
+required = true
+default = "true"
+description = "Use embedded AgentSeek API checkpoint persistence."
+
+[env.SEEKDB_EMBED_DIR]
+required = true
+default = "{{ cookiecutter.seekdb_path }}"
+description = "Embedded AgentSeek API persistence directory."
+
+[env.OCEANBASE_DB_NAME]
+required = true
+default = "{{ cookiecutter.seekdb_db_name }}"
+description = "Embedded AgentSeek API database name."
+
 [tools]
 required = ["uv", "node", "npm"]
 
@@ -66,7 +81,7 @@ description = "Vector table used for ingested documents."
 [env.LANGGRAPH_HOST]
 required = false
 default = "127.0.0.1"
-description = "LangGraph dev bind host. Use 0.0.0.0 only on trusted networks."
+description = "AgentSeek API bind host. Use 0.0.0.0 only on trusted networks."
 
 [env.FRONTEND_HOST]
 required = false
@@ -74,12 +89,12 @@ default = "127.0.0.1"
 description = "Vite frontend bind host. Use 0.0.0.0 only on trusted networks."
 
 [services.backend]
-name = "LangGraph API"
+name = "AgentSeek API"
 url = "http://127.0.0.1:2024"
+tech = "agentseek-api"
 kind = "api"
 display = "advanced"
-description = "Agent API served by the LangGraph development runtime."
-tech = "langgraph"
+description = "Agent API served by the AgentSeek API runtime."
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:2024/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024" }
 
 [services.frontend]
@@ -92,7 +107,7 @@ description = "Browser application and normal entry point for asking retrieval-b
 tech = "vite"
 
 [processes.backend]
-command = ["sh", "-lc", "uv run langgraph dev --no-browser --host ${LANGGRAPH_HOST:-127.0.0.1}"]
+command = ["sh", "-lc", "uv run agentseek-api dev --host ${LANGGRAPH_HOST:-127.0.0.1}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -100,13 +115,15 @@ cwd = "frontend"
 
 [checks.backend]
 type = "http"
-target = "http://127.0.0.1:2024"
+target = "http://127.0.0.1:2024/health"
+service = "backend"
 timeout = 2
 attempts = 3
 
 [checks.frontend]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.frontend_port }}"
+service = "frontend"
 timeout = 2
 attempts = 3
 

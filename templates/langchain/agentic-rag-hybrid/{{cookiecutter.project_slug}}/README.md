@@ -27,7 +27,7 @@ AGENTSEEK_API_BASE=https://api.siliconflow.cn/v1
 
 `AGENTSEEK_API_KEY` feeds chat, image/text embeddings, and optional VLM captioning by default. Existing `SILICONFLOW_API_KEY` and `OPENAI_API_KEY` shell exports still work as compatibility aliases; use `EMBEDDING_API_KEY` or `VLM_API_KEY` only when those paths need separate credentials.
 
-By default, `SEEKDB_PATH` and `MEDIA_DATA_DIR` live under `~/.agentseek/hybrid-rag/{{ cookiecutter.project_slug }}/` so LangGraph dev does not reload while DB, index, upload, or thumbnail files are changing.
+By default, `SEEKDB_PATH` and `MEDIA_DATA_DIR` live under `~/.agentseek/hybrid-rag/{{ cookiecutter.project_slug }}/` so AgentSeek API dev does not reload while DB, index, upload, or thumbnail files are changing.
 
 ## Setup
 

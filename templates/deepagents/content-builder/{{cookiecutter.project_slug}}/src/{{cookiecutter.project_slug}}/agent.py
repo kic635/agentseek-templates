@@ -1,4 +1,4 @@
-"""DeepAgents content builder graph, served by ``langgraph dev``.
+"""DeepAgents content builder graph, served by ``agentseek-api dev``.
 
 This module wires up a ``create_deep_agent`` with brand-voice memory
 (``AGENTS.md``), content skills (``skills/``), a researcher subagent

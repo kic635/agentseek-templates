@@ -1,6 +1,6 @@
 # {{ cookiecutter.project_name }}
 
-A pure LangChain `create_agent` graph served by `langgraph dev`, with a Vite +
+A pure LangChain `create_agent` graph served by `agentseek-api dev`, with a Vite +
 React frontend that streams messages and renders them as markdown. The project
 declares its local lifecycle in `.agentseek/lifecycle.toml`.
 
@@ -32,8 +32,8 @@ Set `AGENTSEEK_MODEL` or `OPENAI_MODEL` to a chat model exposed by your
 provider. If neither is set, the agent falls back to
 `{{ cookiecutter.default_model }}`.
 
-The lifecycle spec reads `.env` only for declared environment requirements. It
-does not inject `.env` values into child processes; `langgraph.json` loads
+The lifecycle spec reads `.env` for declared environment requirements and
+`agentseek dev` passes it to development child processes; `langgraph.json` loads
 `.env` for the backend.
 
 The frontend works with its scaffolded defaults. Copy `frontend/.env.example`
@@ -57,7 +57,7 @@ in `.agentseek/lifecycle.toml`.
 You can still run the underlying commands manually when debugging:
 
 ```bash
-uv run langgraph dev --port {{ cookiecutter.langgraph_port }} --no-browser
+uv run agentseek-api dev --port {{ cookiecutter.langgraph_port }}
 npm run --prefix frontend dev
 ```
 
@@ -78,5 +78,5 @@ Expected behavior:
 ## Notes
 
 - The frontend intentionally pins `@langchain/react` to `~0.3.5`. Newer 1.x
-  clients call endpoints that the bundled `langgraph-cli[inmem]` server line
+  clients call endpoints exposed by the bundled `agentseek-api` runtime
   does not expose yet.

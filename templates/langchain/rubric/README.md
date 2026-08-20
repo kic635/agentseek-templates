@@ -62,5 +62,5 @@ The exact reviewed course source is
 | `default_provider` | Live provider: `openai`, `anthropic`, or `google`. |
 | `worker_model` | Model that drafts and revises candidate code. |
 | `grader_model` | Model that grades Evidence against the rubric. |
-| `langgraph_port` | Port for the LangGraph development API. |
+| `langgraph_port` | Port for the AgentSeek API development server. |
 | `frontend_port` | Port for the Vite application. |

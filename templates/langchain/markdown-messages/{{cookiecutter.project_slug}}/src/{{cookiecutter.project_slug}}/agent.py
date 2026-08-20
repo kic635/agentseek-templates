@@ -1,4 +1,4 @@
-"""LangChain `create_agent` graph, served by `langgraph dev`.
+"""LangChain `create_agent` graph, served by `agentseek-api dev`.
 
 This module is pure LangChain - no agentseek dependency. The 4-line
 ``AGENTSEEK_*`` to ``OPENAI_*`` bridge is a convenience for users whose

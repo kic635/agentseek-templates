@@ -3,7 +3,7 @@
 DeepAgents content builder scaffolded with
 `agentseek create deepagents/content-builder`.
 
-The backend serves a `create_deep_agent(...)` graph through `langgraph dev`
+The backend serves a `create_deep_agent(...)` graph through `agentseek-api dev`
 with brand-voice memory, content skills (blog-post, social-media), a
 researcher subagent, and image generation tools. The frontend streams user
 messages, tool calls, sub-agent delegation, generated images, and the final

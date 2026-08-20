@@ -2,7 +2,7 @@
 
 Pure DeepAgents research agent scaffolded with `agentseek create deepagents/research`.
 
-The backend serves a `create_deep_agent(...)` graph through `langgraph dev`.
+The backend serves a `create_deep_agent(...)` graph through `agentseek-api dev`.
 The frontend streams user messages, tool calls, optional sub-agent delegation,
 DeepAgents todos, and the final markdown answer. AgentSeek is only used as an
 external template and lifecycle tool; this project declares local behavior in

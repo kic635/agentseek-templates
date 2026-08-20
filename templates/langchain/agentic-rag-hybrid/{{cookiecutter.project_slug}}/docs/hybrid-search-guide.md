@@ -19,7 +19,7 @@ The generated project includes `examples/sample_pack/`, a 26-image photo-style p
 
 The pack is intentionally kept in the generated project source tree so it is easy to inspect, edit, zip, and upload. It is not installed as Python package data; run the demo commands from the generated project root.
 
-Mutable runtime state is intentionally separate: `SEEKDB_PATH` and `MEDIA_DATA_DIR` default to `~/.agentseek/hybrid-rag/{{ cookiecutter.project_slug }}/...`. Keeping embedded SeekDB files and upload indexes outside the project avoids `langgraph dev` hot reloads while a custom route is indexing images.
+Mutable runtime state is intentionally separate: `SEEKDB_PATH` and `MEDIA_DATA_DIR` default to `~/.agentseek/hybrid-rag/{{ cookiecutter.project_slug }}/...`. Keeping embedded SeekDB files and upload indexes outside the project avoids unnecessary `agentseek-api dev` reloads while a custom route is indexing images.
 
 1. Balanced: `animal outdoors brown fur`
 2. Keyword: `red product tea label`

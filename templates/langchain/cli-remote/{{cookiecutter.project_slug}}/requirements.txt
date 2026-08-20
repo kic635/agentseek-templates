@@ -1,4 +1,4 @@
 langchain>=1.0.0
 langchain-openai>=0.3.0
-langgraph-cli[inmem]
+agentseek-api[embedded]==0.2.3
 pydantic-settings>=2.0.0

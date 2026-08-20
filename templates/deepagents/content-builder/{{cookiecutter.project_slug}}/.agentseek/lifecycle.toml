@@ -1,9 +1,24 @@
 version = 2
 template = "deepagents/content-builder"
 name = "{{ cookiecutter.project_name }}"
-description = "DeepAgents content workflow with a browser frontend and LangGraph development API."
+description = "DeepAgents content workflow with a browser frontend and AgentSeek API runtime."
 env_file = ".env"
 guide = "README.md"
+
+[env.SEEKDB_EMBED]
+required = true
+default = "true"
+description = "Use embedded AgentSeek API checkpoint persistence."
+
+[env.SEEKDB_EMBED_DIR]
+required = true
+default = "~/.agentseek/{{ cookiecutter.project_slug }}/seekdb"
+description = "Embedded AgentSeek API persistence directory."
+
+[env.OCEANBASE_DB_NAME]
+required = true
+default = "test"
+description = "Embedded AgentSeek API database name."
 
 [tools]
 required = ["uv", "node", "npm"]
@@ -44,17 +59,17 @@ primary = true
 description = "Browser application for creating and reviewing generated content."
 
 [services.langgraph]
-name = "LangGraph API"
+name = "AgentSeek API"
 url = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+tech = "agentseek-api"
 kind = "api"
 display = "advanced"
 primary = false
-description = "LangGraph development API used by the frontend."
-tech = "langgraph"
+description = "AgentSeek API runtime used by the frontend."
 links = { docs = "https://docs.langchain.com/oss/python/langgraph/overview", api_docs = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/docs", studio = "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:{{ cookiecutter.langgraph_port }}" }
 
 [processes.langgraph]
-command = ["uv", "run", "langgraph", "dev", "--port", "{{ cookiecutter.langgraph_port }}", "--no-browser"]
+command = ["uv", "run", "agentseek-api", "dev", "--port", "{{ cookiecutter.langgraph_port }}"]
 
 [processes.frontend]
 command = ["npm", "run", "dev"]
@@ -62,13 +77,15 @@ cwd = "frontend"
 
 [checks.langgraph]
 type = "http"
-target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}"
+target = "http://127.0.0.1:{{ cookiecutter.langgraph_port }}/health"
+service = "langgraph"
 timeout = 2.0
 attempts = 3
 
 [checks.frontend]
 type = "http"
 target = "http://127.0.0.1:{{ cookiecutter.frontend_port }}"
+service = "frontend"
 timeout = 2.0
 attempts = 3
 

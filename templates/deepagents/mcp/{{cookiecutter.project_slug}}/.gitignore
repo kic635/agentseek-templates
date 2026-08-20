@@ -6,7 +6,7 @@ __pycache__/
 build/
 dist/
 
-# LangGraph development state
+# AgentSeek API development state
 .langgraph_api/
 
 # Node

@@ -1,13 +1,13 @@
 [project]
 name = "agentseek-templates"
-version = "0.1.2"
+version = "0.1.3"
 description = "Versioned lifecycle-v2 template catalog for AgentSeek"
 requires-python = ">=3.12,<3.14"
 dependencies = []
 
 [dependency-groups]
 dev = [
-    "agentseek @ git+https://github.com/ob-labs/agentseek.git@2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc",
+    "agentseek @ git+https://github.com/ob-labs/agentseek.git@900f89518c32f8570d7648897394ed96a86a647a",
     "cookiecutter>=2.6.0,<3",
     "pytest>=8.4,<10",
     "ruff>=0.12,<1",

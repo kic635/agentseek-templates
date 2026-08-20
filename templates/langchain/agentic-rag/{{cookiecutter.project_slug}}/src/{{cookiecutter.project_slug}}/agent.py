@@ -1,4 +1,4 @@
-"""LangChain agentic RAG graph, served by `langgraph dev`."""
+"""LangChain agentic RAG graph, served by `agentseek-api dev`."""
 
 from __future__ import annotations
 

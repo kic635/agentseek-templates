@@ -182,10 +182,9 @@ remote or container bind of LangGraph and Vite, opt in from the launching shell:
 LANGGRAPH_HOST=0.0.0.0 FRONTEND_HOST=0.0.0.0 uvx agentseek dev
 ```
 
-`LANGGRAPH_HOST` controls LangGraph from the launching shell. `FRONTEND_HOST`
-controls Vite from that shell or `frontend/.env`. The root `.env` configures the
-application, model, MCP values, and tracing; it does not configure either server
-bind address.
+`LANGGRAPH_HOST` controls the AgentSeek API bind address and `FRONTEND_HOST`
+controls Vite. Set either from the launching shell or the root `.env`; explicitly
+exported shell values take precedence over `.env`.
 
 Binding to `0.0.0.0` makes the development services reachable from other hosts.
 Add an authenticated reverse proxy, TLS, and network access controls before any

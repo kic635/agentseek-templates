@@ -18,8 +18,8 @@ LOCK_PATH = REPOSITORY_ROOT / "uv.lock"
 EXPECTED_SOURCE_COMMIT = "82c659c8d0f6c91981582f154d3001e3d3509299"
 EXPECTED_SOURCE_REGISTRY_SHA256 = "5695b14933fa4be57f77f6838c85dff1be72d8813aa715e50e51869dcf65d639"
 EXPECTED_CORE_REPOSITORY = "https://github.com/ob-labs/agentseek.git"
-EXPECTED_CORE_COMMIT = "2d91d5e8ab1b8eabae74c95057a5a0139e9b4abc"
-EXPECTED_CORE_RELEASE = "v0.1.1"
+EXPECTED_CORE_COMMIT = "900f89518c32f8570d7648897394ed96a86a647a"
+EXPECTED_CORE_RELEASE = "v0.1.2"
 
 
 def _registry() -> dict[str, str]:
@@ -140,7 +140,7 @@ def test_paired_release_metadata_separates_core_dependencies_from_import_provena
     release = json.loads(RELEASE_PATH.read_text(encoding="utf-8"))
     assert release == {
         "schema_version": 1,
-        "catalog_release": "v0.1.2",
+        "catalog_release": "v0.1.3",
         "lifecycle_version": 2,
         "core_repository": EXPECTED_CORE_REPOSITORY,
         "core_commit": EXPECTED_CORE_COMMIT,

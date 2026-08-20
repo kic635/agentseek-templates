@@ -3,3 +3,14 @@
 .ruff_cache/
 __pycache__/
 *.py[cod]
+
+# Local rendered templates, credentials, and runtime artifacts
+.env
+.env.*
+!.env.example
+my_*/
+relay-observability-app/
+**/.venv/
+**/node_modules/
+**/.seekdb-data/
+**/.phoenix-data/

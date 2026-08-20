@@ -11,10 +11,11 @@ dependencies = [
     "langchain-google-genai>=4.0",
     "langchain-mcp-adapters>=0.3,<0.4",
     "langchain-openai>=0.3",
-    "mcp>=1.28,<2",
     "python-dotenv>=1.0",
     "starlette>=0.27",
-    "langgraph-cli[inmem]>=0.4",
+    "agentseek-api[embedded]==0.2.3",
+    "pyobvector[pyseekdb]",
+    "mcp>=1.27.1,<2",
 ]
 
 [build-system]
