@@ -1411,10 +1411,11 @@ def _windows_empty_tree_marker_status(process: subprocess.Popen[bytes]) -> str:
         return "marker-schema-invalid"
     if payload["nonce"] != expected_nonce:
         return "marker-nonce-mismatch"
-    if type(payload["owner_pid"]) is not int:
+    # Windows virtual-environment launchers may retain an outer process while
+    # a child interpreter executes the wrapper. The secret nonce authenticates
+    # the marker; the positive PID remains an auditable wrapper identity.
+    if type(payload["owner_pid"]) is not int or payload["owner_pid"] <= 0:
         return "marker-owner-invalid"
-    if payload["owner_pid"] != process.pid:
-        return "marker-owner-mismatch"
     if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
         return "marker-version-invalid"
     if payload["status"] != "empty":

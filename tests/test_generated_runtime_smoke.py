@@ -321,6 +321,29 @@ def test_windows_cleanup_accepts_exited_owned_wrapper_with_empty_job_marker(
     assert process.wait_calls == 0
 
 
+def test_windows_cleanup_accepts_nonce_bound_marker_from_child_interpreter(
+    tmp_path: Path,
+) -> None:
+    process = _Process(returncode=0)
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    marker = tmp_path / "owned-tree-empty.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "nonce": nonce,
+                "owner_pid": process.pid + 1,
+                "schema_version": 1,
+                "status": "empty",
+            }
+        ),
+        encoding="utf-8",
+    )
+    process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = nonce  # type: ignore[attr-defined]
+
+    smoke._terminate_windows_process(process, {})
+
+
 def test_windows_cleanup_rejects_forged_marker_without_parent_nonce(
     tmp_path: Path,
 ) -> None:
@@ -466,7 +489,7 @@ def test_windows_cleanup_reports_value_free_invalid_marker_reason(
             json.dumps(
                 {
                     "nonce": nonce,
-                    "owner_pid": process.pid + 1,
+                    "owner_pid": 0,
                     "schema_version": 1,
                     "status": "empty",
                 }
@@ -482,7 +505,7 @@ def test_windows_cleanup_reports_value_free_invalid_marker_reason(
         smoke._terminate_windows_process(process, {})
 
     assert captured.value.__notes__[0] == (
-        "Windows cleanup diagnostic: request-consumed, wrapper-exit-zero, marker-owner-mismatch."
+        "Windows cleanup diagnostic: request-consumed, wrapper-exit-zero, marker-owner-invalid."
     )
     assert nonce not in "\n".join(captured.value.__notes__)
 
