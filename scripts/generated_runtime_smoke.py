@@ -1410,11 +1410,44 @@ def _windows_empty_tree_marker_proves_empty(process: subprocess.Popen[bytes]) ->
     )
 
 
+def _is_windows_job_wrapper(process: subprocess.Popen[bytes]) -> bool:
+    return (
+        getattr(process, "_agentseek_windows_empty_tree_marker", None) is not None
+        or getattr(process, "_agentseek_windows_empty_tree_nonce", None) is not None
+    )
+
+
+def _force_windows_wrapper_exit(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        with contextlib.suppress(OSError):
+            process.kill()
+    with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+        process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+
+
+def _terminate_windows_job_wrapper(process: subprocess.Popen[bytes]) -> None:
+    try:
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+    except (AttributeError, OSError, ValueError):
+        _force_windows_wrapper_exit(process)
+    else:
+        try:
+            process.wait(timeout=LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            _force_windows_wrapper_exit(process)
+    if _windows_empty_tree_marker_proves_empty(process):
+        return
+    raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
+
+
 def _terminate_windows_process(process: subprocess.Popen[bytes], environment: Mapping[str, str]) -> None:
     if process.poll() is not None:
         if _windows_empty_tree_marker_proves_empty(process):
             return
         raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
+    if _is_windows_job_wrapper(process):
+        _terminate_windows_job_wrapper(process)
+        return
     try:
         taskkill, cleanup_environment = _windows_cleanup_tool(environment)
     except RuntimeError:

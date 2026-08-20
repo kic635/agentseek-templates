@@ -369,24 +369,19 @@ def test_windows_cleanup_rejects_matching_noncryptographic_marker_nonce(
         smoke._terminate_windows_process(process, {})
 
 
-def test_windows_cleanup_accepts_owned_marker_created_during_taskkill_race(
+def test_windows_cleanup_requests_owned_wrapper_shutdown_without_taskkill(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    system_root = tmp_path / "Windows"
-    taskkill = system_root / "System32" / "taskkill.exe"
-    taskkill.parent.mkdir(parents=True)
-    taskkill.touch()
     process = _Process()
     nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
     marker = tmp_path / "owned-tree-empty.json"
     process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
     process._agentseek_windows_empty_tree_nonce = nonce  # type: ignore[attr-defined]
+    signals: list[int] = []
 
-    def raced_taskkill(
-        command: list[str],
-        **_kwargs: object,
-    ) -> smoke.subprocess.CompletedProcess[bytes]:
+    def send_signal(signum: int) -> None:
+        signals.append(signum)
         marker.write_text(
             json.dumps(
                 {
@@ -399,14 +394,45 @@ def test_windows_cleanup_accepts_owned_marker_created_during_taskkill_race(
             encoding="utf-8",
         )
         process.returncode = 0
-        return smoke.subprocess.CompletedProcess(command, 128)
 
-    monkeypatch.setattr(smoke.subprocess, "run", raced_taskkill)
+    process.send_signal = send_signal  # type: ignore[attr-defined]
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
+    monkeypatch.setattr(
+        smoke.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("owned wrappers must not use taskkill"),
+    )
 
-    smoke._terminate_windows_process(process, {"SystemRoot": str(system_root)})
+    smoke._terminate_windows_process(process, {})
 
+    assert signals == [1]
     assert process.kill_calls == 0
-    assert process.wait_calls == 1
+    assert process.wait_timeouts == [smoke.LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS]
+
+
+def test_windows_cleanup_fails_closed_when_owned_wrapper_cannot_confirm_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    process = _Process()
+    process._agentseek_windows_empty_tree_marker = str(tmp_path / "missing.json")  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = "a" * 64  # type: ignore[attr-defined]
+    signal_calls = 0
+
+    def send_signal(_signum: int) -> None:
+        nonlocal signal_calls
+        signal_calls += 1
+        raise OSError("control signal failed")
+
+    process.send_signal = send_signal  # type: ignore[attr-defined]
+    monkeypatch.setattr(smoke.signal, "CTRL_BREAK_EVENT", 1, raising=False)
+
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR):
+        smoke._terminate_windows_process(process, {})
+
+    assert signal_calls == 1
+    assert process.kill_calls == 1
+    assert process.wait_timeouts == [smoke.FORCE_SHUTDOWN_TIMEOUT_SECONDS]
 
 
 def test_windows_job_wrapper_marks_empty_tree_after_nonzero_child_exit(
@@ -473,6 +499,62 @@ def test_windows_job_wrapper_marks_empty_tree_after_nonzero_child_exit(
     }
     if os.name != "nt":
         assert marker.stat().st_mode & 0o777 == 0o600
+
+
+def test_windows_job_wrapper_marks_empty_tree_after_parent_cleanup_request(
+    tmp_path: Path,
+) -> None:
+    wrapper = _load_windows_job_wrapper()
+    marker = tmp_path / "owned-tree-empty.json"
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    events: list[object] = []
+
+    class Child:
+        def wait(self) -> int:
+            events.append("wait")
+            raise wrapper._CleanupRequested
+
+        def close_remaining_tree(self, *, timeout: float) -> None:
+            events.append(("unexpected-close-remaining-tree", timeout))
+
+        def ensure_closed(self, *, timeout: float) -> None:
+            events.append(("ensure-closed", timeout))
+
+        def terminate_and_reap(self, *, timeout: float) -> None:
+            events.append(("terminate-and-reap", timeout))
+
+        def close(self) -> None:
+            events.append("close")
+
+    class Supervisor:
+        @staticmethod
+        def start(command: list[str], *, env: dict[str, str], cwd: str):
+            del command, env, cwd
+            return Child()
+
+    exit_code = wrapper.run_owned_command(
+        ["child"],
+        marker=marker,
+        nonce_stream=io.BytesIO(f"{nonce}\n".encode()),
+        environment={},
+        cwd=r"C:\runtime",
+        supervisor_type=Supervisor,
+        owner_pid=4321,
+    )
+
+    assert exit_code == 0
+    assert events == [
+        "wait",
+        ("terminate-and-reap", wrapper.JOB_CLEANUP_TIMEOUT_SECONDS),
+        ("ensure-closed", wrapper.JOB_CLEANUP_TIMEOUT_SECONDS),
+        "close",
+    ]
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "nonce": nonce,
+        "owner_pid": 4321,
+        "schema_version": 1,
+        "status": "empty",
+    }
 
 
 @pytest.mark.parametrize(

@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import re
+import signal
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -16,6 +17,10 @@ JOB_CLEANUP_TIMEOUT_SECONDS = 10.0
 EMPTY_TREE_MARKER_SCHEMA_VERSION = 1
 NONCE_PATTERN = re.compile(r"[0-9a-f]{64}")
 NONCE_PAYLOAD_BYTES = 65
+
+
+class _CleanupRequested(KeyboardInterrupt):
+    """Internal control-flow signal for parent-requested Job cleanup."""
 
 
 class _OwnedChild(Protocol):
@@ -118,8 +123,13 @@ def run_owned_command(
     failure: BaseException | None = None
     exit_code: int | None = None
     try:
-        exit_code = child.wait()
-        child.close_remaining_tree(timeout=JOB_CLEANUP_TIMEOUT_SECONDS)
+        try:
+            exit_code = child.wait()
+        except _CleanupRequested:
+            child.terminate_and_reap(timeout=JOB_CLEANUP_TIMEOUT_SECONDS)
+            exit_code = 0
+        else:
+            child.close_remaining_tree(timeout=JOB_CLEANUP_TIMEOUT_SECONDS)
     except BaseException as exc:
         failure = exc
         with contextlib.suppress(BaseException):
@@ -159,15 +169,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     from agentseek_api.process_supervisor import ForegroundChildSupervisor
 
-    return run_owned_command(
-        args.command,
-        marker=args.marker,
-        nonce_stream=sys.stdin.buffer,
-        environment=os.environ,
-        cwd=os.getcwd(),
-        supervisor_type=ForegroundChildSupervisor,
-        owner_pid=os.getpid(),
-    )
+    def request_cleanup(_signum: int, _frame: object) -> None:
+        signal.signal(signal.SIGBREAK, signal.SIG_IGN)
+        raise _CleanupRequested
+
+    previous_handler = signal.signal(signal.SIGBREAK, request_cleanup)
+    try:
+        return run_owned_command(
+            args.command,
+            marker=args.marker,
+            nonce_stream=sys.stdin.buffer,
+            environment=os.environ,
+            cwd=os.getcwd(),
+            supervisor_type=ForegroundChildSupervisor,
+            owner_pid=os.getpid(),
+        )
+    finally:
+        signal.signal(signal.SIGBREAK, previous_handler)
 
 
 if __name__ == "__main__":
