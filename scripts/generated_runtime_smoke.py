@@ -1378,7 +1378,7 @@ def _windows_cleanup_tool(environment: Mapping[str, str]) -> tuple[Path, dict[st
     return taskkill, {selected_name: raw_root}
 
 
-def _windows_empty_tree_marker_proves_empty(process: subprocess.Popen[bytes]) -> bool:
+def _windows_empty_tree_marker_status(process: subprocess.Popen[bytes]) -> str:
     raw_path = getattr(process, "_agentseek_windows_empty_tree_marker", None)
     expected_nonce = getattr(process, "_agentseek_windows_empty_tree_nonce", None)
     if (
@@ -1387,28 +1387,43 @@ def _windows_empty_tree_marker_proves_empty(process: subprocess.Popen[bytes]) ->
         or not isinstance(expected_nonce, str)
         or WINDOWS_EMPTY_TREE_NONCE_PATTERN.fullmatch(expected_nonce) is None
     ):
-        return False
+        return "marker-metadata-invalid"
     path = Path(raw_path)
     try:
-        if not path.is_absolute() or path.is_symlink() or not path.is_file():
-            return False
+        if not path.is_absolute():
+            return "marker-path-invalid"
+        if path.is_symlink():
+            return "marker-symlink"
+        if not path.exists():
+            return "marker-missing"
+        if not path.is_file():
+            return "marker-not-file"
         with path.open("rb") as stream:
             raw = stream.read(WINDOWS_EMPTY_TREE_MARKER_MAX_BYTES + 1)
         if len(raw) > WINDOWS_EMPTY_TREE_MARKER_MAX_BYTES:
-            return False
+            return "marker-oversized"
         payload = json.loads(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    return (
-        isinstance(payload, dict)
-        and set(payload) == {"nonce", "owner_pid", "schema_version", "status"}
-        and payload["nonce"] == expected_nonce
-        and type(payload["owner_pid"]) is int
-        and payload["owner_pid"] == process.pid
-        and type(payload["schema_version"]) is int
-        and payload["schema_version"] == 1
-        and payload["status"] == "empty"
-    )
+    except OSError:
+        return "marker-unreadable"
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "marker-malformed"
+    if not isinstance(payload, dict) or set(payload) != {"nonce", "owner_pid", "schema_version", "status"}:
+        return "marker-schema-invalid"
+    if payload["nonce"] != expected_nonce:
+        return "marker-nonce-mismatch"
+    if type(payload["owner_pid"]) is not int:
+        return "marker-owner-invalid"
+    if payload["owner_pid"] != process.pid:
+        return "marker-owner-mismatch"
+    if type(payload["schema_version"]) is not int or payload["schema_version"] != 1:
+        return "marker-version-invalid"
+    if payload["status"] != "empty":
+        return "marker-status-invalid"
+    return "marker-valid"
+
+
+def _windows_empty_tree_marker_proves_empty(process: subprocess.Popen[bytes]) -> bool:
+    return _windows_empty_tree_marker_status(process) == "marker-valid"
 
 
 def _is_windows_job_wrapper(process: subprocess.Popen[bytes]) -> bool:
@@ -1457,22 +1472,24 @@ def _terminate_windows_job_wrapper(process: subprocess.Popen[bytes]) -> None:
     except RuntimeError:
         _force_windows_wrapper_exit(process)
         raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from None
-    wait_outcome = "wrapper-exited"
+    wait_outcome = "wrapper-exit-unknown"
     try:
-        process.wait(timeout=LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS)
+        exit_code = process.wait(timeout=LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS)
+        wait_outcome = "wrapper-exit-zero" if exit_code == 0 else "wrapper-exit-nonzero"
     except subprocess.TimeoutExpired:
         wait_outcome = "wrapper-timeout"
         _force_windows_wrapper_exit(process)
     except OSError:
         wait_outcome = "wrapper-wait-error"
         _force_windows_wrapper_exit(process)
-    if _windows_empty_tree_marker_proves_empty(process):
+    marker_outcome = _windows_empty_tree_marker_status(process)
+    if marker_outcome == "marker-valid":
         return
     request_outcome = (
         "request-pending" if request is not None and (request.exists() or request.is_symlink()) else "request-consumed"
     )
     error = RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
-    error.add_note(f"Windows cleanup diagnostic: {request_outcome}, {wait_outcome}.")
+    error.add_note(f"Windows cleanup diagnostic: {request_outcome}, {wait_outcome}, {marker_outcome}.")
     log_tail = _read_log(process)
     if log_tail:
         error.add_note(f"Windows wrapper log tail (redacted):\n{log_tail}")

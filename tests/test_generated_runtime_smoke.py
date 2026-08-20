@@ -443,10 +443,48 @@ def test_windows_cleanup_fails_closed_when_owned_wrapper_cannot_confirm_shutdown
         smoke.FORCE_SHUTDOWN_TIMEOUT_SECONDS,
     ]
     assert captured.value.__notes__ == [
-        "Windows cleanup diagnostic: request-pending, wrapper-timeout.",
+        "Windows cleanup diagnostic: request-pending, wrapper-timeout, marker-missing.",
         "Windows wrapper log tail (redacted):\nwrapper-stage=job-finalization <redacted>\n",
     ]
     assert "secret-value" not in "\n".join(captured.value.__notes__)
+
+
+def test_windows_cleanup_reports_value_free_invalid_marker_reason(
+    tmp_path: Path,
+) -> None:
+    process = _Process()
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    marker = tmp_path / "owned-tree-empty.json"
+    process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = nonce  # type: ignore[attr-defined]
+    process.args = ["fixed-command"]  # type: ignore[attr-defined]
+
+    def wait(*, timeout: float) -> int:
+        assert timeout == smoke.LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS
+        smoke._windows_cleanup_request_path(marker).unlink()
+        marker.write_text(
+            json.dumps(
+                {
+                    "nonce": nonce,
+                    "owner_pid": process.pid + 1,
+                    "schema_version": 1,
+                    "status": "empty",
+                }
+            ),
+            encoding="utf-8",
+        )
+        process.returncode = 0
+        return 0
+
+    process.wait = wait  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match=smoke.WINDOWS_TREE_CLEANUP_ERROR) as captured:
+        smoke._terminate_windows_process(process, {})
+
+    assert captured.value.__notes__[0] == (
+        "Windows cleanup diagnostic: request-consumed, wrapper-exit-zero, marker-owner-mismatch."
+    )
+    assert nonce not in "\n".join(captured.value.__notes__)
 
 
 def test_windows_job_wrapper_request_interrupts_wait_and_empties_job(
