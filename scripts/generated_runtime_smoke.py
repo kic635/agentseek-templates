@@ -1473,6 +1473,9 @@ def _terminate_windows_job_wrapper(process: subprocess.Popen[bytes]) -> None:
     )
     error = RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
     error.add_note(f"Windows cleanup diagnostic: {request_outcome}, {wait_outcome}.")
+    log_tail = _read_log(process)
+    if log_tail:
+        error.add_note(f"Windows wrapper log tail (redacted):\n{log_tail}")
     raise error
 
 

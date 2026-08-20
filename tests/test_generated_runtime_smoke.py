@@ -419,6 +419,11 @@ def test_windows_cleanup_fails_closed_when_owned_wrapper_cannot_confirm_shutdown
     process = _Process()
     process._agentseek_windows_empty_tree_marker = str(tmp_path / "missing.json")  # type: ignore[attr-defined]
     process._agentseek_windows_empty_tree_nonce = "a" * 64  # type: ignore[attr-defined]
+    wrapper_log = tmp_path / "wrapper.log"
+    wrapper_log.write_text("wrapper-stage=job-finalization secret-value\n", encoding="utf-8")
+    process._agentseek_log_path = str(wrapper_log)  # type: ignore[attr-defined]
+    process._agentseek_environment = {"API_KEY": "secret-value"}  # type: ignore[attr-defined]
+    process.args = ["fixed-command"]  # type: ignore[attr-defined]
 
     def wait(*, timeout: float) -> int:
         process.wait_timeouts.append(timeout)
@@ -437,7 +442,11 @@ def test_windows_cleanup_fails_closed_when_owned_wrapper_cannot_confirm_shutdown
         smoke.LAUNCHER_SHUTDOWN_TIMEOUT_SECONDS,
         smoke.FORCE_SHUTDOWN_TIMEOUT_SECONDS,
     ]
-    assert captured.value.__notes__ == ["Windows cleanup diagnostic: request-pending, wrapper-timeout."]
+    assert captured.value.__notes__ == [
+        "Windows cleanup diagnostic: request-pending, wrapper-timeout.",
+        "Windows wrapper log tail (redacted):\nwrapper-stage=job-finalization <redacted>\n",
+    ]
+    assert "secret-value" not in "\n".join(captured.value.__notes__)
 
 
 def test_windows_job_wrapper_request_interrupts_wait_and_empties_job(
