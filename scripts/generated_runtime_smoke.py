@@ -1422,6 +1422,8 @@ def _terminate_windows_process(process: subprocess.Popen[bytes], environment: Ma
             process.kill()
         with contextlib.suppress(OSError, subprocess.TimeoutExpired):
             process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+        if _windows_empty_tree_marker_proves_empty(process):
+            return
         raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from None
     try:
         completed = subprocess.run(
@@ -1442,6 +1444,8 @@ def _terminate_windows_process(process: subprocess.Popen[bytes], environment: Ma
                 process.kill()
         with contextlib.suppress(OSError, subprocess.TimeoutExpired):
             process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+        if _windows_empty_tree_marker_proves_empty(process):
+            return
         raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR)
     try:
         process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
@@ -1450,6 +1454,8 @@ def _terminate_windows_process(process: subprocess.Popen[bytes], environment: Ma
             process.kill()
         with contextlib.suppress(OSError, subprocess.TimeoutExpired):
             process.wait(timeout=FORCE_SHUTDOWN_TIMEOUT_SECONDS)
+        if _windows_empty_tree_marker_proves_empty(process):
+            return
         raise RuntimeError(WINDOWS_TREE_CLEANUP_ERROR) from None
 
 

@@ -369,6 +369,46 @@ def test_windows_cleanup_rejects_matching_noncryptographic_marker_nonce(
         smoke._terminate_windows_process(process, {})
 
 
+def test_windows_cleanup_accepts_owned_marker_created_during_taskkill_race(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    system_root = tmp_path / "Windows"
+    taskkill = system_root / "System32" / "taskkill.exe"
+    taskkill.parent.mkdir(parents=True)
+    taskkill.touch()
+    process = _Process()
+    nonce = "8fdd06df7fc44f4cb34cc976943bf9437793a196830005dc9858d438b9ea67cb"
+    marker = tmp_path / "owned-tree-empty.json"
+    process._agentseek_windows_empty_tree_marker = str(marker)  # type: ignore[attr-defined]
+    process._agentseek_windows_empty_tree_nonce = nonce  # type: ignore[attr-defined]
+
+    def raced_taskkill(
+        command: list[str],
+        **_kwargs: object,
+    ) -> smoke.subprocess.CompletedProcess[bytes]:
+        marker.write_text(
+            json.dumps(
+                {
+                    "nonce": nonce,
+                    "owner_pid": process.pid,
+                    "schema_version": 1,
+                    "status": "empty",
+                }
+            ),
+            encoding="utf-8",
+        )
+        process.returncode = 0
+        return smoke.subprocess.CompletedProcess(command, 128)
+
+    monkeypatch.setattr(smoke.subprocess, "run", raced_taskkill)
+
+    smoke._terminate_windows_process(process, {"SystemRoot": str(system_root)})
+
+    assert process.kill_calls == 0
+    assert process.wait_calls == 1
+
+
 def test_windows_job_wrapper_marks_empty_tree_after_nonzero_child_exit(
     tmp_path: Path,
 ) -> None:
