@@ -8,7 +8,11 @@ import warnings
 from deepagents import create_deep_agent
 from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
+from langchain_core.language_models import BaseChatModel
 from langchain_core.tools import tool
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph.state import CompiledStateGraph
 
 load_dotenv()
 
@@ -94,15 +98,34 @@ researcher = {
     "tools": [inspect_streaming_topic],
 }
 
-graph = create_deep_agent(
-    model=model,
-    tools=[inspect_streaming_topic],
-    system_prompt=(
-        "You are a coordinator demonstrating Deep Agents Event Streaming. "
-        "For every user request, delegate the explanation to the researcher "
-        "sub-agent before answering. Do not answer from memory first. After "
-        "the researcher returns, summarize the result and explicitly mention "
-        "that the UI can observe messages, tool calls, values, subagents, and output."
-    ),
-    subagents=[researcher],
-)
+
+def _build_graph(
+    agent_model: BaseChatModel,
+    *,
+    checkpointer: BaseCheckpointSaver | None = None,
+) -> CompiledStateGraph:
+    return create_deep_agent(
+        model=agent_model,
+        tools=[inspect_streaming_topic],
+        system_prompt=(
+            "You are a coordinator demonstrating Deep Agents Event Streaming. "
+            "For every user request, delegate the explanation to the researcher "
+            "sub-agent before answering. Do not answer from memory first. After "
+            "the researcher returns, summarize the result and explicitly mention "
+            "that the UI can observe messages, tool calls, values, subagents, and output."
+        ),
+        subagents=[researcher],
+        checkpointer=checkpointer,
+    )
+
+
+def build_stream_graph(agent_model: BaseChatModel) -> CompiledStateGraph:
+    """Build an in-process graph that preserves custom-route thread state."""
+    return _build_graph(agent_model, checkpointer=InMemorySaver())
+
+
+# LangGraph API injects managed persistence into this registered graph.
+graph = _build_graph(model)
+
+# The custom FastAPI route invokes its graph directly, so it owns a checkpointer.
+stream_graph = build_stream_graph(model)

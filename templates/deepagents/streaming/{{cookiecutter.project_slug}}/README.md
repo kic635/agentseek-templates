@@ -8,10 +8,21 @@ raw protocol events.
 
 ```bash
 cp .env.example .env
+cp frontend/.env.example frontend/.env
+uv sync
+npm install --prefix frontend
+```
+
+Start the backend in terminal one:
+
+```bash
 uv run langgraph dev --port {{ cookiecutter.langgraph_port }} --no-browser
-cd frontend
-npm install
-npm run dev
+```
+
+Start the browser UI in terminal two:
+
+```bash
+npm run dev --prefix frontend
 ```
 
 Open `http://127.0.0.1:{{ cookiecutter.frontend_port }}` and try:
@@ -44,10 +55,12 @@ state snapshots, raw protocol events, and final output. The projection counter
 strip updates while the stream is active, and stream failures appear as
 structured error cards instead of silently ending the request.
 
-The browser keeps a stable `thread_id` for follow-up requests. This first
-version intentionally uses `langgraph dev` so the v3 projection behavior can
-be tested directly; AgentSeek API runtime integration can be added later after
-its v3 projection support is stable.
+The browser keeps a stable `thread_id` for follow-up requests. The custom
+route keeps thread history in memory for the current backend process, so
+restarting `langgraph dev` starts a new session. This first version
+intentionally uses `langgraph dev` so the v3 projection behavior can be tested
+directly; AgentSeek API runtime integration can be added later after its v3
+projection support is stable.
 
 Set `AGENTSEEK_MODEL_PROVIDER`, `AGENTSEEK_MODEL`, and the matching provider
 API key in `.env`. OpenAI-compatible gateways can set `OPENAI_API_BASE`.

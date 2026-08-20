@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import json
+import os
 
 from fastapi.testclient import TestClient
 from langchain_core.language_models.fake_chat_models import FakeListChatModel
@@ -12,6 +12,7 @@ os.environ.setdefault("AGENTSEEK_MODEL", "offline-test-model")
 
 from deepagents import create_deep_agent  # noqa: E402
 from {{ cookiecutter.project_slug }} import routes  # noqa: E402
+from {{ cookiecutter.project_slug }}.agent import build_stream_graph  # noqa: E402
 
 
 class ToolCapableFakeModel(FakeListChatModel):
@@ -42,3 +43,22 @@ def test_real_deepagents_graph_reaches_v3_projection_route(monkeypatch) -> None:
     assert output_events[-1]["phase"] == "completed"
     assert "bound method" not in response.text
     assert "AsyncGraphRunStream.output" not in response.text
+
+
+def test_stream_route_persists_history_across_follow_up_requests(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    persistent_graph = build_stream_graph(
+        ToolCapableFakeModel(responses=["first offline answer", "second offline answer"])
+    )
+    monkeypatch.setattr(routes, "graph", persistent_graph)
+    client = TestClient(routes.app)
+
+    for content in ("first question", "follow up question"):
+        response = client.post(
+            "/custom/stream",
+            json={"thread_id": "persisted-thread", "messages": [{"role": "user", "content": content}]},
+        )
+        assert response.status_code == 200
+
+    snapshot = persistent_graph.get_state({"configurable": {"thread_id": "persisted-thread"}})
+    user_messages = [message.content for message in snapshot.values["messages"] if message.type == "human"]
+    assert user_messages == ["first question", "follow up question"]

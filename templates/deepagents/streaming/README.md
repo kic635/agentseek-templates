@@ -35,6 +35,8 @@ uses the local `inspect_streaming_topic` tool. This makes delegation and tool
 events observable without requiring a search provider. The UI also keeps a
 stable `thread_id`, updates projection counters as events arrive, and renders
 provider or stream failures as structured error cards.
+The custom route keeps thread history in memory for the current backend
+process; restarting `langgraph dev` starts a new session.
 
 The backend consumes the official v3 projections concurrently through the
 LangGraph development server. The raw stream

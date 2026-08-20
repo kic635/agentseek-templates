@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from .agent import graph
+from .agent import stream_graph as graph
 from .event_adapter import (
     error_event,
     message_event,
