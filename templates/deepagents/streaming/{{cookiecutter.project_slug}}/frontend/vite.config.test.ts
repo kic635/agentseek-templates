@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { UserConfig } from "vite";
-import viteConfig from "./vite.config";
+import viteConfig from "./vite.config.ts";
 
 const config = viteConfig as UserConfig;
 
